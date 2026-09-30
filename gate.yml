@@ -1,0 +1,330 @@
+# gate.yml — how cafaye-py is gated, declared rather than guessed.
+#
+# WHY THIS FILE EXISTS. `cafaye/core` owns the format
+# (`schemas/gate.schema.json`), the checker (`harness/gate_check.py`) and the
+# reasoning (`docs/gate.md`). This file is cafaye-py's adoption of it, not an
+# invention: the argument for the format is core's, and the numbers and patterns
+# in here are cafaye-py's own, read out of cafaye-py's own gate output on
+# `worker/cafaye-py-10-gate` at 3908488. Nothing below is copied from core's,
+# courier's, darkroom's or muse's declaration.
+#
+# WHAT THE CHECKER PROVES ABOUT THIS FILE, AND WHAT IT DOES NOT. It proves the
+# command runs from the repository root, the entrypoint exists and is
+# executable, `mise run prime` resolves to that same file, the CI workflow really
+# invokes the declared argv, and — the part that matters — that running the
+# declared command makes every proof below appear in its output, with the two
+# countable ones at or above their floors. It does NOT prove the tests touched
+# anything they claim to, and it does not prove an `external.requirements` entry
+# is satisfied: a requirement is the operator's, before gating, and the checker
+# says so rather than guessing.
+#
+# ---------------------------------------------------------------------------
+# MEASURED, NOT GUESSED — and the measurement found a real defect
+# ---------------------------------------------------------------------------
+# Three commands, run on this worktree before this file was written. They are
+# not the same command, and the differences are the interesting part:
+#
+#   1. `./bin/prime`             the gate. Exit 0 in 58s from a cold `.venv`.
+#                               586 passed, 0 skipped, 0 xfailed. 100.00% line
+#                               AND branch coverage against `fail_under = 100`.
+#   2. `mise run prime`          DID NOT EXIST before this packet. `mise tasks`
+#                               listed `gate`, `test` and `typecheck`; there was
+#                               no `prime`, so the fleet's spelling failed with
+#                               "task not found".
+#   3. `mise run gate`           EXISTED AND WAS BROKEN. Its `run` was
+#                               `./bin/gate`, and there is no `bin/gate` in this
+#                               repository — it printed
+#                               `sh: ./bin/gate: No such file or directory` and
+#                               mise reported `ERROR task failed`.
+#
+# So the developer-facing spelling was a dead command and the fleet's spelling
+# was absent, while README.md, AGENTS.md and CHANGELOG.md all said
+# `./bin/prime`, and CI ran `./bin/prime`. `bin/prime` was correct, documented,
+# and unreachable from the one tool whose whole job is to tell you the commands.
+# This file declares it, and `mise.toml` now resolves both `prime` and `gate`
+# to that same file. The repair is two lines in `mise.toml`; without it this
+# declaration could not name a mise task at all, and `gate.task-unresolvable`
+# would have been the correct verdict on a repository whose gate is fine.
+#
+# THE SECOND DIFFERENCE, which this file records and does not resolve: CI's
+# `live` job runs `./bin/live`, and nothing in CI runs `./bin/prime --live`.
+# Both reach `bin/live` — `bin/prime --live` calls it — but the composition is
+# only exercised by hand. That is a real gap and it is written down rather than
+# papered over, because the fix is a one-word change to the workflow and the
+# decision of which is right is a manager's. What is NOT a gap, and is why this
+# is still a declaration of a working gate: `bin/live` exits 1 with a sentence
+# naming the missing variable rather than exiting 0 having run nothing, so the
+# `live` job's green means the env-gated tier ran.
+#
+# ---------------------------------------------------------------------------
+# PROVEN RED, FIVE TIMES — a gate that has never been observed red is not a gate
+# ---------------------------------------------------------------------------
+# Every case below was run on this worktree against `gate-check --prove`, and
+# every one ended with the tree byte-identical to how it was found (verified by
+# `git status --porcelain` and `diff`, not asserted). The measurements, so the
+# next reader does not have to take any of them on trust:
+#
+#   1. `bin/prime` replaced by a two-line stub whose whole body is `exit 0`.
+#      The brief's scenario, run literally. -> 7 × `gate.proof-missing`, exit 1.
+#      Every proof in this file disappeared, which is the answer: a checker
+#      replaced by a function that unconditionally exits zero leaves THIS
+#      repository red. It would have left it green before this file existed.
+#   2. `gate.command` changed to `[bin/prime, --fast]`, breaking NOTHING.
+#      `--fast` is a real flag on the real script: it does the frozen install
+#      and then `exit 0`, and its own last line says "Nothing was checked".
+#      -> 6 × `gate.proof-missing`, exit 1. Only `frozen-install` survived, which
+#      is correct: that is the one thing `--fast` does do.
+#   3. One test made to skip, through a throwaway pytest plugin, with the gate
+#      otherwise untouched. THE INTERESTING ONE, and the reason `no-skip` exists:
+#      the gate printed `585 passed, 1 skipped`, coverage was still 100.00%, it
+#      printed `prime: unit tier GREEN`, and it **exited 0**. `suite` passed at
+#      585 against its floor of 580. The single finding was
+#      `gate.proof-missing` on `no-skip`. One green badge, caught by exactly the
+#      one proof written to catch it.
+#   4. `gate.proof[no-skip].minimum` raised from 586 to 587 with the suite
+#      unchanged. -> `FAIL gate.floor: proof 'no-skip' reported 586 and the
+#      declaration's floor is 587`, exit 1. The ratchet is read, and the
+#      message names the exact shortfall.
+#   5. One test made to fail, through a throwaway `test_*.py`. -> `gate.nonzero`
+#      plus 5 × `gate.proof-missing`, exit 1 — and this is what settled the
+#      `suite` pattern rather than a guess. The summary line on a failing run is
+#      `======== 1 failed, 586 passed in 5.62s ========`, which
+#      `^=+ ([0-9]+) passed` cannot match, because the digits are followed by
+#      ` failed` and not by ` passed`.
+#
+# What is NOT in that list, and why: nothing was done to an assertion to make
+# something pass. Case 3 took one test out of the run and case 5 added one that
+# fails; neither touched an assertion, a skip marker or a threshold in the suite
+# itself. No sleep, no raised retry count, no loosened assertion anywhere in this
+# packet. The only number changed in any file was `minimum`, in case 4, and it
+# was raised.
+version: 1
+name: cafaye-py
+
+gate:
+  # The command a person or a tool runs, as an argv and never a shell string, so
+  # the exit code is the gate's own. This fleet's one recorded false green was
+  # `… | tail -45; echo "PRIME EXIT=$?"` under zsh, where `$?` is `tail`'s.
+  # `bin/prime` is bash with `set -euo pipefail` and an explicit
+  # `${PIPESTATUS[0]}` for exactly that reason, so the script is the right thing
+  # to name rather than a shell line around it.
+  #
+  # `bin/prime` and not `mise run prime`, and that is a measured claim. Both run
+  # the same file, but `./bin/prime` is what README.md, AGENTS.md and CI all say
+  # today, and CI installs uv itself with `astral-sh/setup-uv@v5` rather than
+  # mise — so a declaration whose command were `mise` would be describing a gate
+  # this repository's own CI does not run. The mise task is declared below and
+  # cross-checked against this entrypoint instead, which is the division the
+  # format is for: `command` is the gate, `miseTask` is the fleet's spelling of
+  # it, and the checker proves the two are the same file.
+  command: [bin/prime]
+  # The fleet's spelling. It is an alias added by this packet: cafaye-py had no
+  # `prime` task at all, and `gate.task-undeclared` would otherwise have been
+  # the honest verdict for a repository whose gate has existed since 0.1.0.
+  # `[tasks.prime]` and `[tasks.gate]` both run `./bin/prime` and nothing else —
+  # one gate under two names, not two gates, which is the precedent core's own
+  # `gate.yml` set when it renamed `test` to `prime` and kept the alias.
+  miseTask: prime
+  # The file behind the command, and the file the mise task must resolve to.
+  # Cross-checked against `mise.toml`, so a task that drifts onto another file
+  # is `gate.task-unresolvable` rather than a quiet disagreement.
+  entrypoint: bin/prime
+  # Generous, and the reasoning is the same one every adopter gives: this number
+  # exists to stop a hung gate, not to measure one. Measured on this worktree
+  # with an empty `.venv` and a warm uv cache: 58s. Warm, with `.venv` present:
+  # about 20s, of which 8s is pytest. The worst realistic case is CI's matrix,
+  # where four interpreters each rebuild the package and re-run mypy from a cold
+  # cache — minutes, not hours. A budget tight enough to be a bug detector is
+  # tight enough to be a flake generator on somebody's first run.
+  timeoutSeconds: 1800
+  proof:
+    # The step `bin/prime` runs before anything else, and it is in the list
+    # because of what it proves rather than what it says. `uv sync --frozen`
+    # installs exactly what `uv.lock` says and FAILS when the lock and
+    # `pyproject.toml` disagree; a bare `uv sync` would quietly rewrite the lock,
+    # which is how a lockfile reaches master having drifted from the manifest it
+    # claims to describe. A gate that stopped installing the lockfile is a gate
+    # running against whatever happens to be in `.venv`, and the header going
+    # missing is the only trace of it that leaves.
+    - id: frozen-install
+      match: '^==> uv sync --frozen'
+    # mypy's own verdict, not `bin/prime`'s step header. The header is printed
+    # when the step STARTS, so it proves the script got that far; this line is
+    # printed when the step is satisfied, so it proves the type checker ran and
+    # had nothing to say. Left unanchored at the end on purpose: the file count
+    # in the line is a number that moves whenever a module is added, and a proof
+    # that breaks on an unrelated change is a proof that gets deleted.
+    - id: type-check
+      match: '^Success: no issues found'
+    # The coverage gate's own line, re-read from `coverage.xml` by
+    # `bin/check-coverage` rather than trusted from pytest's summary. That
+    # independence is the whole point of the step: a coverage gate that only
+    # works because `fail_under` happens to still be wired into `addopts` is one
+    # keystroke away from enforcing nothing, and this line is what it prints
+    # when it did enforce. `bin/check-coverage` prints `BELOW` in place of `ok`
+    # on a shortfall, so this proof is false on a coverage failure as well as on
+    # a nonzero exit. Quoted, because a plain YAML scalar may not contain `: `
+    # and the unquoted spelling is a document core's restricted reader accepts
+    # and every other parser refuses; `.` is escaped for the same reason it is
+    # escaped in a regex, which is that this is a pattern and not a sentence.
+    - id: coverage-gate
+      match: '^    fail_under = 100   actual = 100\.00%   ok$'
+    # The count. 586, measured on the run recorded in
+    # `REPORT-cafaye-py-10-gate.md`, not estimated.
+    #
+    # The pattern is anchored at the start of the line and captures ONE group,
+    # and both of those are load-bearing rather than tidy:
+    #   * `^=+ ` is pytest's own summary rule. A FAILING run prints
+    #     `= 1 failed, 47 passed in 3.10s =` — `-x` is in `addopts`, so the run
+    #     stops at the first failure — and that line cannot satisfy
+    #     `^=+ ([0-9]+) passed`, because the digits are followed by ` failed`.
+    #     Verified against a real failing run, not reasoned about; see that
+    #     report.
+    #   * exactly one capture group, because `minimum` is read from group 1 and a
+    #     second group is `gate.proof-invalid`.
+    #
+    # 580 and not 586 is a deliberate six-test margin, on muse's reasoning: a
+    # floor at exactly today's count is a floor that has to be edited before
+    # anything can be added, and a floor people edit under time pressure is a
+    # floor that gets lowered. Six below the measured 586 is still a real
+    # detector — a suite that quietly lost seven tests is `gate.floor`, which is
+    # a failure — and adding a test costs nothing.
+    - id: suite
+      match: '^=+ ([0-9]+) passed'
+      minimum: 580
+    # THE LOAD-BEARING ONE, and the negative lookahead is the whole of it. It
+    # matches a summary line only when nothing was skipped: on
+    # `= 585 passed, 1 skipped in 3.10s =` the lookahead sees `skipped` further
+    # along the same line and refuses, so `gate.proof-missing` is a FAILURE on a
+    # run that exited zero. That is the run this repository is most exposed to,
+    # because `addopts` carries `-x`, `filterwarnings = ["error"]` and
+    # `fail_under = 100`: any of those turning one test into a skip produces a
+    # green exit code and a smaller suite, and a CI job that silently skips the
+    # hard part is worse than no CI.
+    #
+    # 586 exactly, and not a rounded number, because cafaye-py's unit tier has no
+    # external dependency to be absent: there is no `skipif`, no
+    # `importorskip` and no environment variable anywhere under `tests/`, so 586
+    # is the whole suite and the difference between 586 and 585 is one test that
+    # did not run. It cannot be satisfied by a partial run. It is also a ratchet
+    # in the safe direction: adding tests leaves it green, and deleting one takes
+    # it under.
+    #
+    # Read as a pair, and honestly: whenever a run skips, `no-skip` subsumes
+    # `suite` — it demands a strictly higher count AND the absence of the word.
+    # That overlap is left in on purpose. One count is "the suite ran"; two is
+    # "the suite ran and nothing was left out", and the second is the one that
+    # makes a skip a red rather than a decrement. A reader who has to work out
+    # which of the two floors does the work is a reader who eventually deletes
+    # the wrong one.
+    - id: no-skip
+      match: '^=+ (?!.*skipped)([0-9]+) passed'
+      minimum: 586
+    # `bin/prime`'s own last word, printed only after all six steps returned
+    # zero. Its job is to separate "the script decided green" from "a process
+    # exited zero", which is the distinction this entire format exists for. A
+    # `bin/prime` that reached its last line and then said something other than
+    # this is a script that has been edited underneath the declaration, and the
+    # declaration stops being true of the gate.
+    - id: unit-tier-green
+      match: '^prime: unit tier GREEN'
+    # THE TIER THAT DID NOT RUN, named in the gate's own output on every single
+    # run. AGENTS.md calls this rule "a tier that is not run is said out loud",
+    # and a rule a file states is not a rule; this makes it one. Delete the two
+    # `prime: env-gated tier NOT RUN` lines from `bin/prime` — the quiet way to
+    # make a green run say less than it used to — and this proof disappears and
+    # the declaration goes red, which is the mechanism the rule needed and did
+    # not have.
+    #
+    # The parenthesised counts are in the pattern on purpose: `0 tests skipped as
+    # unavailable, 0 not requested` is the claim that nothing was quietly
+    # skipped on the way to being not-run. A run that skipped three tests and
+    # then said so does not match this, and should not.
+    - id: env-tier-not-run
+      match: '^prime: env-gated tier NOT RUN \(0 tests skipped as unavailable, 0 not requested\)\.$'
+
+external:
+  # False, and saying so is the point. `bin/prime` refuses to run without `uv`
+  # on PATH — line 82 is `command -v uv` and it exits 127 — and its first real
+  # step installs this repository's whole locked dependency closure from PyPI. A
+  # declaration that called this self-contained would be describing a gate nobody
+  # has ever run on a clean machine, which is the same defect as identity's gate
+  # being green over a database nobody had migrated, told the other way round.
+  selfContained: false
+  requirements:
+    - kind: toolchain
+      # Measured, not assumed: `bin/prime` exits 127 at its first check when `uv`
+      # is not on PATH, and deliberately does NOT run `mise install` itself — the
+      # comment at the top of that script says why, and it is right: installing a
+      # toolchain as a side effect of running a gate is how a worktree ends up
+      # tested against a version nobody chose.
+      name: >-
+        mise, plus the CPython 3.14.7 and uv 0.12.20 mise.toml pins. Without
+        them bin/prime exits 127 before running a test.
+      satisfy:
+        # A bare name, so the checker deliberately does not run it and reports
+        # `gate.requirement-unproven` instead — a warning, never a failure. A
+        # requirement satisfied by something on PATH is a claim about THIS
+        # machine, and a checker that went looking for uv would be red on a
+        # laptop and green on CI. Exactly one warning is expected from this file,
+        # and this is it; the network requirement below is satisfied by a path
+        # inside the repository, which the checker CAN resolve and does.
+        command: [mise, install]
+        unmet: >-
+          bin/prime exits 127 with "prime: uv is not on PATH" in the message, and
+          nothing has been checked
+    - kind: network
+      # "ONCE, ON A COLD CHECKOUT" rather than always, because that is the
+      # measured truth: `uv sync --frozen --all-groups` installed 21 packages on
+      # the run that produced this file, from a warm machine-level uv cache. uv's
+      # cache lives outside this repository, so a warm machine needs no network
+      # and saying "network" flatly would over-claim a requirement this gate does
+      # not always have.
+      name: >-
+        PyPI, ONCE, on a cold checkout — the 21 packages in this repository's
+        `uv.lock`. A warm machine needs no network.
+      satisfy:
+        # A repository-relative path, so the checker verifies the file is there:
+        # a requirement satisfied by a file that does not exist is a pointer to a
+        # page that does not exist, which is what this field replaced. `bin/prime`
+        # is the argv that actually reaches the network, because
+        # `uv sync --frozen` is the first thing it runs.
+        command: [bin/prime]
+        unmet: >-
+          uv cannot resolve or download, and bin/prime exits nonzero at its
+          "uv sync --frozen" step, before the linter has looked at a file
+  # NOT required, and named here so nobody goes looking for them. Every one of
+  # these was checked against the tree rather than assumed, because a requirement
+  # list padded with things that are not requirements is the same defect as one
+  # that omits things that are:
+  #   * no database, and no service. `tests/` opens no socket: every request in
+  #     the suite goes through `httpx.MockTransport`, which is asserted rather
+  #     than hoped for.
+  #   * no core checkout. cafaye-py does NOT vendor core's schemas, so there is
+  #     no `../core` requirement here the way muse has one. This client is the
+  #     one artefact in the fleet with no drift guard against core, and that is
+  #     a finding rather than an absence — named in the report.
+  #   * no credential, and no secret, for the declared gate. `$CAFAYE_LIVE_TOKEN`
+  #     is required by the env-gated tier alone and `bin/prime` without `--live`
+  #     never reads it; `bin/live` requires `$CAFAYE_LIVE_BASE_URL` too and both
+  #     reach the process as environment variables, never as arguments, never in
+  #     a message. Nothing here prints a value.
+  #   * no filesystem path outside the repository. `.venv/`, `.mypy_cache/`,
+  #     `.pytest_cache/`, `.coverage` and `coverage.xml` are all written inside
+  #     the tree, and all five are in `.gitignore`.
+
+ci:
+  workflow: .github/workflows/ci.yml
+  # `[bin/prime]` and not `[bin/prime, --live]`, and the reason is CI's own
+  # shape: this workflow has two jobs. The `unit` job runs `./bin/prime` on a
+  # 3.11/3.12/3.13/3.14 matrix, and the `live` job runs `./bin/live` — gated on
+  # `schedule` and `workflow_dispatch`, because a fork's push has no secrets.
+  # Both `run:` bodies are read by the checker and both are real, so the argv CI
+  # runs for the declared gate is exactly this one.
+  #
+  # Declaring the live tier here would be a lie of a different kind: it would
+  # make `gate.ci-disagrees` green over a job that runs on a schedule and never
+  # on a pull request. The env-gated tier is declared where it belongs, as the
+  # `env-tier-not-run` proof — a claim that the default gate says out loud that
+  # it did not run.
+  invokes: [bin/prime]

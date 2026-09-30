@@ -7,7 +7,62 @@ this project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
-Nothing. The next change goes here.
+### Added
+
+**`gate.yml` — the gate is declared, not discovered.** The repository root now
+says what gates it, against `cafaye/core`'s `schemas/gate.schema.json`: the
+entrypoint, the arguments, the mise task, what the gate needs from the machine,
+the CI workflow it is reached from, and seven proofs over the gate's own output
+— three of them countable, at floors of 580 and 586. Two things follow that are
+easy to undo by accident, so they are stated here as well as in the file:
+
+- A floor is a ratchet. `suite` sits six below the measured 586 so adding a
+  test costs no edit; `no-skip` sits at 586 exactly, because cafaye-py's unit
+  tier has no `skipif`, no `importorskip` and no environment variable anywhere
+  under `tests/`, so the difference between 586 and 585 is one test that did not
+  run.
+- `no-skip`'s negative lookahead is what makes a skip a red rather than a
+  decrement. Measured: one test made to skip produced `585 passed, 1 skipped`,
+  100.00% coverage, `prime: unit tier GREEN` and **exit 0** from the gate — and
+  `gate-check --prove` was still red, naming `gate.proof-missing` on that proof
+  alone.
+
+**The declaration was proven red five times before it was trusted**, and each
+proof is recorded in `gate.yml` with its findings. The headline: `bin/prime`
+replaced by a stub whose whole body is `exit 0` produced **seven**
+`gate.proof-missing` failures. Before this file existed, it would have produced
+none.
+
+### Fixed
+
+**`mise run gate` was a dead command, and the fleet's spelling did not exist.**
+`mise.toml`'s `[tasks.gate]` read `run = "./bin/gate"`, and there is no
+`bin/gate` in this repository — it printed `sh: ./bin/gate: No such file or
+directory` and mise reported `ERROR task failed`. So the one gate spelling mise
+advertised was broken, `mise run prime` failed with "task not found", and the
+only correct command in the repository was the one nothing pointed a developer
+at: README, AGENTS.md and CI all said `./bin/prime`, and `mise.toml` — the file
+you run `mise install` next to — said something else. Both tasks now resolve to
+`./bin/prime`. `mise run prime` is the fleet's spelling and is new here;
+`mise run gate` is kept as an alias, because one gate under two names is one
+gate and not two.
+
+### Known gaps
+
+- **CI runs `./bin/live`, not `./bin/prime --live`.** Both reach the same file,
+  but the composition is only exercised by hand, so nothing in CI has ever run
+  `bin/prime` with a live credential. Recorded in `gate.yml` rather than
+  papered over; the fix is a one-word change to the workflow and which side it
+  should move is a manager's call.
+- **cafaye-py has no drift guard against `cafaye/core`.** Unlike `muse`, it does
+  not vendor core's schemas and has no `../core` requirement in `gate.yml`,
+  because there is nothing here to drift. The cost is that nothing in this
+  repository would notice if core changed a convention this client documents in
+  a comment. Named in `REPORT-cafaye-py-10-gate.md`; not fixed, because the fix
+  is a design decision rather than a declaration.
+- `bin/gate-self-test`, which would make the five red proofs above reproducible
+  on demand the way `bin/red-proofs` does for the test-level ones. courier and
+  darkroom ship one; cafaye-py does not yet.
 
 ## [0.1.0] — 2026-09-30
 
