@@ -1,0 +1,229 @@
+[build-system]
+requires = ["hatchling>=1.27"]
+build-backend = "hatchling.build"
+
+[project]
+name = "cafaye-py"
+version = "0.1.0"
+description = "The cafaye Python client — hand-written, typed, sync and async, and structurally unable to log a credential."
+readme = "README.md"
+license = { file = "LICENSE" }
+requires-python = ">=3.11"
+keywords = ["cafaye", "api-client", "httpx", "rfc9457", "typed"]
+classifiers = [
+  "Development Status :: 3 - Alpha",
+  "Intended Audience :: Developers",
+  "License :: OSI Approved :: MIT License",
+  "Programming Language :: Python :: 3",
+  "Programming Language :: Python :: 3.11",
+  "Programming Language :: Python :: 3.12",
+  "Programming Language :: Python :: 3.13",
+  "Programming Language :: Python :: 3.14",
+  "Programming Language :: Python :: Implementation :: CPython",
+  "Topic :: Software Development :: Libraries :: Python Modules",
+  "Typing :: Typed",
+]
+# ONE runtime dependency, and it is load-bearing rather than convenient.
+#
+# httpx is the transport, and `sync` and `async` come out of one `httpx.Client`
+# implementation, which is the requirement: "httpx supports both from one
+# implementation. Provide both; do not write two clients." Writing this on
+# `urllib` would mean a hand-rolled async story or `asyncio.to_thread`, and
+# hand-rolling the transport is how a client ends up owning its own TLS
+# configuration, its own redirect policy and its own connection pool.
+#
+# There is no pydantic. A generated client for Python drags in pydantic, and
+# pydantic is a *runtime dependency a consumer has to configure and keep in
+# step*: v1 versus v2 changes the import path, and a model layer that
+# validates on construction turns a service that added a field into an
+# exception in the consumer's code rather than in the service's. This client
+# models responses as frozen dataclasses built from the documents, which is
+# dependency-light and cannot fail on a field it did not know about.
+dependencies = ["httpx>=0.27,<1"]
+
+[project.urls]
+Homepage = "https://github.com/cafaye/cafaye-py"
+Repository = "git@github.com:cafaye/cafaye-py.git"
+Changelog = "https://github.com/cafaye/cafaye-py/blob/master/CHANGELOG.md"
+
+[dependency-groups]
+dev = [
+  "pytest>=8.3",
+  "pytest-cov>=6.0",
+  "mypy>=1.13",
+  "ruff>=0.8",
+]
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/cafaye"]
+
+[tool.hatch.build.targets.sdist]
+include = ["/src", "/tests", "/README.md", "/CHANGELOG.md", "/LICENSE"]
+
+# ---------------------------------------------------------------------------
+# COVERAGE
+# ---------------------------------------------------------------------------
+#
+# `source` IS SET, and the comment above it is the reason this block exists at
+# all.
+#
+# Without `source`, coverage.py measures only the modules that were IMPORTED. A
+# module nothing imports has no file in the report, contributes nothing to the
+# total, and coverage is 100% green with that module entirely untested. That is
+# not a hypothetical: it is what happens the moment a service client is added to
+# `src/cafaye/_services/` and no test names it. With `source = ["src/cafaye"]`,
+# an unimported module appears as 0% and the gate fails — which is the correct
+# outcome, because the module is untested.
+[tool.coverage.run]
+source = ["src/cafaye"]
+branch = true
+
+[tool.coverage.report]
+show_missing = true
+skip_covered = false
+# Refuse to report on a file that does not exist. A missing file is a typo, and
+# a typo in an omit pattern is a file nobody measures.
+fail_under = 100
+
+# ---------------------------------------------------------------------------
+# PYTEST
+# ---------------------------------------------------------------------------
+[tool.pytest.ini_options]
+minversion = "8.0"
+testpaths = ["tests"]
+addopts = [
+  "--cov",
+  "--cov-report=term-missing",
+  "--cov-report=xml",
+  "--strict-markers",
+  "--strict-config",
+  # `-p no:randomly` is not here because nothing installs it; what IS here is
+  # `-x`, so the gate stops at the first failure instead of running a suite
+  # whose later results are meaningless.
+  "-x",
+]
+filterwarnings = ["error"]
+markers = [
+  "leak: the credential-leak assertions, kept separate so a leak is obvious in the run",
+]
+
+# ---------------------------------------------------------------------------
+# MYPY — the gate's type checker
+# ---------------------------------------------------------------------------
+#
+# mypy, and the reason is narrower than "it is popular".
+#
+# The specific thing this package needs is `--warn-unreachable`. Its whole job is
+# a redactor with a handful of credential-shaped patterns, and the failure mode
+# of a redactor is a branch that can never be taken — a pattern nobody matches
+# with, because a typo made it unreachable. Every other checker will happily
+# type that branch; mypy with `--warn-unreachable` reports it as dead code, which
+# is exactly the signal. pyright is the better inference engine and I would pick
+# it for a vendored generated tree, but this tree is hand-written, ~40 files
+# small, and the check that protects the invariant is the one mypy has.
+#
+# `disallow_any_explicit` is deliberately NOT on. `httpx` returns `Any` at its
+# boundary and fighting that with explicit `Any` annotations trades one lie for
+# a bigger one. `warn_return_any` IS on, so an `Any` arriving from httpx cannot
+# quietly become a return value.
+[tool.mypy]
+python_version = "3.11"
+mypy_path = "src"
+packages = ["cafaye", "tests"]
+strict = true
+warn_unreachable = true
+warn_unused_ignores = true
+warn_return_any = true
+disallow_untyped_defs = true
+disallow_any_generics = true
+check_untyped_defs = true
+no_implicit_optional = true
+enable_error_code = ["ignore-without-code", "redundant-expr", "truthy-bool"]
+
+# ---------------------------------------------------------------------------
+# RUFF — the gate's linter and formatter
+# ---------------------------------------------------------------------------
+#
+# ruff for both linting and formatting, because they share one configuration
+# file and one binary and one version. A separate formatter means a second
+# config, a second version and a second thing whose opinion differs from the
+# first one's; the format is also stable configuration, which is what this gate
+# needs — `ruff format` is not going to move a file's shape under a patch
+# release the way a tool with an "experimental" formatter flag can.
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+src = ["src", "tests"]
+extend-exclude = [".venv", "build", "dist"]
+
+[tool.ruff.lint]
+select = [
+  "E",    # pycodestyle errors
+  "W",    # pycodestyle warnings
+  "F",    # pyflakes
+  "I",    # isort
+  "N",    # pep8-naming
+  "UP",   # pyupgrade
+  "B",    # bugbear
+  "A",    # builtin shadowing
+  "C4",   # comprehensions
+  "DTZ",  # naive datetimes
+  "T20",  # no print() — see the note below
+  "ARG",  # unused arguments
+  "SIM",  # simplify
+  "PTH",  # prefer pathlib
+  "RUF",  # ruff's own rules
+  "ANN",  # annotations
+  "S",    # bandit — the security rules, deliberately
+  "ASYNC",
+  "TID",
+  "PL",
+  "TRY",
+  "G",    # logging format
+  "LOG",
+  "FA",   # future annotations
+]
+ignore = [
+  # `PLR0913` (too many arguments) — a dataclass field list and an
+  # `httpx` keyword argument set both trip it, and both are lists, not design
+  # smells. `PLR2004` (magic value) — `402`, `401` and `200` are the HTTP status
+  # codes this package's whole error model is written in terms of; naming them
+  # would be worse than reading them.
+  "PLR0913",
+  "PLR2004",
+  # `ANN401` — `Any` in an argument position. `redact` and `classify` take
+  # `object`, but `_finish` genuinely receives JSON of unknown shape and the
+  # honest annotation there is `Any`, not a narrower one that would be a lie.
+  "ANN401",
+  # `S101` — assert. The test suite is assert.
+  "S101",
+  # `TRY003` — "avoid specifying long messages outside the exception class". This
+  # package's error messages ARE the documentation of why a failure happened, and
+  # several of them are deliberately long. Moving them out would put the
+  # reasoning somewhere it would stop being read.
+  "TRY003",
+  # `EM101`/`TRY400` — same reason; the string IS the message.
+  "EM101",
+]
+
+[tool.ruff.lint.per-file-ignores]
+# Tests use `assert` (above) and legitimately reach into private members to
+# assert on internals, and pytest fixtures are named for their fixtures.
+"tests/*" = ["S105", "S106", "S311", "PLR2004", "ARG001", "ARG002", "N802"]
+# `print` is the point of a CLI example, and the credential-leak test asserts
+# that none of them run.
+"tests/test_credential_leak.py" = ["T201"]
+
+[tool.ruff.lint.flake8-tidy-imports]
+ban-relative-imports = "parents"
+
+[tool.ruff.lint.isort]
+required-imports = ["from __future__ import annotations"]
+known-first-party = ["cafaye"]
+combine-as-imports = true
+
+[tool.ruff.lint.pydocstyle]
+convention = "google"
+
+[tool.ruff.format]
+docstring-code-format = true

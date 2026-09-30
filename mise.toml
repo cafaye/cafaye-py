@@ -1,0 +1,39 @@
+# Toolchain pins for this repository. The worktree and CI must agree, so the
+# versions live here rather than in whatever the machine happens to have
+# installed.
+#
+#   mise install        # install the pinned toolchain
+#   mise run gate       # the gate: format, lint, typecheck, tests, coverage
+#
+# WHY THESE NUMBERS
+#   - python 3.14.7 is what `pyproject.toml`'s dev group is resolved and tested
+#     against locally. It is the newest interpreter this machine's mise offers,
+#     and a client that only runs on the newest interpreter has never been
+#     tested on any other. `requires-python` says ">=3.11" and CI runs the gate
+#     on 3.11, 3.12, 3.13 and 3.14; this pin is the *development* interpreter, not
+#     the only supported one.
+#   - uv 0.12.20 is pinned rather than ranged, for the same reason
+#     `cafaye-ts` pins its generator exactly: the resolver is part of the build.
+#     A `uv.lock` is only a lock if the resolver that produced it is known.
+#
+# There is no separate `pytest`/`mypy`/`ruff` pin HERE. Those are dev
+# dependencies in `pyproject.toml` and are pinned there by `uv.lock`, which is
+# the file that actually decides what runs. A toolchain pin in mise and a
+# dependency pin in a manifest are two different facts — duplicating the number
+# here would create a second copy to keep in sync for no additional guarantee.
+
+[tools]
+python = "3.14.7"
+uv = "0.12.20"
+
+[tasks.gate]
+description = "The gate: format, lint, typecheck, the full test suite, the coverage check"
+run = "./bin/gate"
+
+[tasks.test]
+description = "The test suite with coverage, no gate"
+run = "uv run pytest"
+
+[tasks.typecheck]
+description = "mypy over the package and the tests"
+run = "uv run mypy"

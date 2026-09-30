@@ -1,0 +1,4 @@
+ImportError while loading conftest '/Users/kaka/Code/any/moon/cafaye/cafaye-py/tests/conftest.py'.
+tests/conftest.py:24: in <module>
+    from cafaye import AsyncCafaye, Cafaye
+E   ImportError: cannot import name 'AsyncCafaye' from 'cafaye' (/Users/kaka/Code/any/moon/cafaye/cafaye-py/src/cafaye/__init__.py)

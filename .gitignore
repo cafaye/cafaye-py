@@ -1,0 +1,31 @@
+# Python bytecode and build products. A first commit in a repository with no
+# .gitignore captures every __pycache__/*.pyc in the tree, and they are
+# rewritten on every interpreter start, so the first diff after checkout is
+# noise on every file.
+__pycache__/
+*.py[cod]
+*.so
+
+# The local virtualenv. NOTE: this was previously masked by a global
+# ~/.gitignore_global, which is why the repository had no .gitignore of its own.
+# A contributor without that global file would have had .venv committed.
+.venv/
+venv/
+
+# Test and coverage artefacts. A cached coverage report is worse than none:
+# actions/cache restore-keys restore across branches, so a restored report is a
+# report about another branch (MD12).
+.coverage
+.coverage.*
+htmlcov/
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+
+# Editor and OS noise
+.DS_Store
+*.swp
+
+# Never commit a local environment file. Secrets are never plaintext at rest.
+.env
+.env.*
