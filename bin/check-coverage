@@ -1,0 +1,64 @@
+#!/usr/bin/env python3
+"""The coverage step of ``bin/prime``, as a file rather than a heredoc.
+
+Two reasons, and the second is the one that cost time.
+
+1. **It re-reads the coverage report instead of trusting the test run's summary.**
+   ``pytest-cov``'s ``fail_under`` comes from ``[tool.coverage.report]``, and a
+   coverage gate that only works because that setting happens to be wired up
+   inside ``addopts`` is one keystroke away from silently not enforcing anything.
+   Reading ``coverage.xml`` and ``pyproject.toml`` independently means the gate's
+   claim does not depend on whether the wiring is still there.
+
+2. **A heredoc terminator in a shell script is a single point of failure.** This
+   one arrived as ``PY`` rather than ``PYTHON``, which bash accepted as a
+   perfectly ordinary line, and the failure was a ``SyntaxError`` from inside
+   Python several lines later with nothing pointing at the cause. A file has no
+   terminator to get wrong.
+
+Exit 0 when the reported line coverage meets ``fail_under``, 1 when it does not.
+"""
+
+from __future__ import annotations
+
+import sys
+import tomllib
+import xml.etree.ElementTree as ET
+from pathlib import Path
+
+
+def main(argv: list[str]) -> int:
+    if len(argv) != 2:
+        print("check-coverage: expected exactly one argument, the repository root", file=sys.stderr)
+        return 2
+
+    root = Path(argv[1])
+    report = root / "coverage.xml"
+    if not report.is_file():
+        print(f"check-coverage: {report} does not exist, so nothing was measured", file=sys.stderr)
+        return 1
+
+    configured = tomllib.loads((root / "pyproject.toml").read_text(encoding="utf-8"))["tool"][
+        "coverage"
+    ]["report"]["fail_under"]
+
+    # `line-rate` is the ratio coverage.py writes; the gate is stated in
+    # percent, and the multiplication is the only place the two meet.
+    line_rate = float(ET.parse(report).getroot().get("line-rate", "0"))
+    actual = line_rate * 100
+
+    if actual < configured:
+        print(f"    fail_under = {configured}   actual = {actual:.2f}%   BELOW")
+        print(
+            f"check-coverage: {actual:.2f}% is below the {configured}% this repository "
+            "requires. Every number here is a file or a branch no test reached.",
+            file=sys.stderr,
+        )
+        return 1
+
+    print(f"    fail_under = {configured}   actual = {actual:.2f}%   ok")
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main(sys.argv))

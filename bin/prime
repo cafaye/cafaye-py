@@ -2,9 +2,9 @@
 #
 # The gate. Everything that must be true before a commit lands, in one command.
 #
-#   bin/gate            the unit tier: install, format, lint, types, tests, coverage
-#   bin/gate --fast     the frozen install only
-#   bin/gate --live     additionally DEMAND the env-gated tier against a deployment
+#   bin/prime            the unit tier: install, format, lint, types, tests, coverage
+#   bin/prime --fast     the frozen install only
+#   bin/prime --live     additionally DEMAND the env-gated tier against a deployment
 #
 # WHY BASH AND NOT SH
 # -------------------
@@ -59,7 +59,7 @@ for arg in "$@"; do
     --fast) FAST=1 ;;
     --live) LIVE=1 ;;
     -h|--help)
-      sed -n '2,45p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'
+      sed -n '2,48p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'
       exit 0
       ;;
     *)
@@ -132,21 +132,8 @@ step "coverage (fail_under from pyproject.toml, re-read from the XML)"
 if [ ! -f coverage.xml ]; then
   fail "no coverage.xml was produced, so the coverage gate did not run."
 fi
-python3 - "$REPO_ROOT" <<'PYTHON'
-import sys
-import tomllib
-import xml.etree.ElementTree as ET
-
-root = sys.argv[1]
-with open(f"{root}/pyproject.toml", "rb") as handle:
-    configured = tomllib.load(handle)["tool"]["coverage"]["report"]["fail_under"]
-line_rate = float(ET.parse(f"{root}/coverage.xml").getroot().get("line-rate", "0"))
-actual = line_rate * 100
-status = "ok" if actual >= configured else "BELOW"
-print(f"    fail_under = {configured}   actual = {actual:.2f}%   {status}")
-if actual < configured:
-    sys.exit(f"prime: coverage {actual:.2f}% is below fail_under {configured}%.")
-PY
+uv run python "$REPO_ROOT/bin/check-coverage" "$REPO_ROOT" \
+  || fail "coverage is below the fail_under this repository requires."
 
 # --- the tier that was not run ---------------------------------------------
 # Said out loud, every time, in the gate's own output. A reader of a green build
@@ -162,6 +149,6 @@ if [ "$LIVE" = "1" ]; then
 else
   echo "prime: env-gated tier NOT RUN (0 tests skipped as unavailable, 0 not requested)."
   echo "    It needs a live cafaye deployment and a credential, so it is not part of"
-  echo "    the default gate. Run 'bin/gate --live' to demand it. It is never skipped"
+  echo "    the default gate. Run 'bin/prime --live' to demand it. It is never skipped"
   echo "    silently: this line is in the output of every green run."
 fi

@@ -224,12 +224,31 @@ def _decode(response: httpx.Response) -> object:
     ``None`` for a body that will not parse is the honest answer and it is what
     keeps a reverse proxy's HTML 502 from becoming a ``JSONDecodeError`` with no
     mention of which service answered.
+
+    ONE ``ResponseNotRead`` GUARD, NOT TWO, AND THE SECOND WAS DEAD CODE
+    -----------------------------------------------------------------------
+
+    A streaming response raises ``ResponseNotRead`` from both ``read()`` **and**
+    from ``json()``, because ``json()`` goes through ``self.content``. A second
+    handler on the ``json()`` call therefore looked necessary and could not fire:
+    if ``read()`` raised we have already returned, and if it did not, ``_content``
+    is set and ``json()`` has nothing left to raise. Coverage said so, which is
+    what ``fail_under = 100`` and ``--warn-unreachable`` are for -- "cannot happen"
+    is a finding rather than a style note.
+
+    What the second handler was covering, though, is real, and it is worth saying
+    what actually holds the line: without the first one, the exception escaped
+    ``_decode``, was caught by ``_perform``'s blanket ``except Exception``, and
+    came back out as a ``CafayeNetworkError`` with ``reason="unknown"``. A
+    client-side programming fault, described as the network having failed, which
+    sends somebody to the wrong dashboard at three in the morning.
+
+    So: one guard, on the call that can raise, and the body is treated as absent
+    because it is.
     """
     try:
         response.read()
-    except (
-        httpx.ResponseNotRead
-    ):  # pragma: no cover - defensive; httpx raises this only for a streaming response mid-flight
+    except httpx.ResponseNotRead:
         return None
     try:
         return response.json()
@@ -249,8 +268,32 @@ def _body_text(body: object, response: httpx.Response) -> str:
         return body
     try:
         return response.text
-    except (UnicodeDecodeError, httpx.ResponseNotRead):
-        return repr(response.content)
+    except httpx.ResponseNotRead:
+        # There is genuinely nothing to show, and the obvious fallback is wrong.
+        #
+        # Two things, both found by a test rather than by reading:
+        #
+        #   1. `UnicodeDecodeError` was in this tuple and could never fire.
+        #      `httpx.Response.text` decodes with a `TextDecoder` that
+        #      **replaces** undecodable bytes rather than raising, so a body of
+        #      `b"\xff\xfe"` comes back as `"\ufffd\ufffd"`. A handler for an
+        #      exception nothing raises is a branch the next reader has to reason
+        #      about for no benefit, and this package runs mypy with
+        #      `--warn-unreachable` and coverage at `fail_under = 100` precisely so
+        #      that "cannot happen" is a finding rather than a style note.
+        #
+        #   2. `repr(response.content)` -- the fallback that was here -- raises
+        #      **the same exception**, because `.content` on a streaming response
+        #      nobody read is the access that failed. So the handler traded one
+        #      `ResponseNotRead` for another, one frame later.
+        #
+        # An empty excerpt is the honest answer, and `protocol_error_from` already
+        # turns an empty one into `body_snippet=None`, which is the same thing it
+        # says when redaction removed everything: there is nothing here to show.
+        # This package's own lifecycle never reaches it -- every response is read
+        # before its text is asked for -- so it is a guard against a transport
+        # that hands back a streaming response.
+        return ""
 
 
 class _BaseCafaye:
