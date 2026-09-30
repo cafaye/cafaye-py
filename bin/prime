@@ -9,7 +9,7 @@
 # WHY BASH AND NOT SH
 # -------------------
 # `${PIPESTATUS[0]}` does not exist in zsh, which is this machine's default shell
-# and therefore the shell a careless `sh -c "bin/gate | tee log"` runs under. Under
+# and therefore the shell a careless `sh -c "bin/prime | tee log"` runs under. Under
 # zsh a piped command's status is the status of the *last* stage, so a gate piped
 # into `tail` exits 0 no matter what the gate decided. That has already produced
 # one false green in this fleet. `set -euo pipefail` plus an explicit
