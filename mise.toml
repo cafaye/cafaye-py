@@ -3,7 +3,11 @@
 # installed.
 #
 #   mise install        # install the pinned toolchain
-#   mise run gate       # the gate: format, lint, typecheck, tests, coverage
+#   mise run prime      # the fleet's spelling of the gate: install, format, lint,
+#                       # typecheck, tests, coverage
+#   mise run gate       # an alias for the same file. One gate under two names is
+#                       # one gate, not two.
+#   ./bin/prime         # the file itself, which is what CI runs
 #
 # WHY THESE NUMBERS
 #   - python 3.14.7 is what `pyproject.toml`'s dev group is resolved and tested
@@ -26,9 +30,26 @@
 python = "3.14.7"
 uv = "0.12.20"
 
-[tasks.gate]
+# WHY `run` NAMES A FILE AND NOT A COMMAND LINE
+# ---------------------------------------------
+# Both gate tasks run `./bin/prime` and nothing else — no pipes, no `&&`, no
+# `cd`. That is not a style preference, it is what lets `gate.yml`'s checker
+# resolve the task to a file on disk and compare it with the declared
+# entrypoint: a `run` string containing a shell operator is a string the checker
+# has to hand to a shell to understand, and it reports `gate.task-unreadable`
+# rather than a verdict. It was worse than that before cafaye-py-10: this table
+# read `run = "./bin/gate"`, and `bin/gate` has never existed in this
+# repository, so `mise run gate` — the one gate spelling mise advertised, and the
+# one this file's own header used to recommend — died with
+# `sh: ./bin/gate: No such file or directory`. See REPORT-cafaye-py-10-gate.md.
+
+[tasks.prime]
 description = "The gate: format, lint, typecheck, the full test suite, the coverage check"
-run = "./bin/gate"
+run = "./bin/prime"
+
+[tasks.gate]
+description = "An alias for `mise run prime`. The same file, so this is one gate with two names."
+run = "./bin/prime"
 
 [tasks.test]
 description = "The test suite with coverage, no gate"

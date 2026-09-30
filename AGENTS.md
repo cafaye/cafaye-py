@@ -129,7 +129,7 @@ would be a second place to forget.
 - **Red proofs are kept.** `.red/` is not a scratch directory. `bin/red-proofs`
   reproduces them, and it verifies it restored the tree by diffing.
 
-## THE GATE IS ONE COMMAND
+## THE GATE IS ONE COMMAND, AND IT IS DECLARED
 
 `./bin/prime`. CI runs `./bin/prime`, not a re-implementation of it in YAML — a
 CI job that runs something other than the local gate proves nothing about the
@@ -138,6 +138,25 @@ local gate, and the two drift within a month.
 It is bash, and that is load-bearing. `${PIPESTATUS[0]}` does not exist in zsh,
 so a gate piped into `tail` exits 0 under zsh regardless of what the gate
 decided, and that has already produced one false green in this fleet.
+
+**`gate.yml` at the root says what that command is worth**, against core's
+`schemas/gate.schema.json`, and `mise run prime` resolves to the same file. Read
+`gate.yml` before changing `bin/prime`, `mise.toml` or the workflow: it is what
+turns "run the gate" from something a person has to get right into a file.
+
+Two things in it are easy to undo by accident:
+
+- **`proof[].no-skip`'s negative lookahead is load-bearing.** It matches a
+  summary line only when nothing was skipped. Measured, not assumed: with one
+  test made to skip, `bin/prime` printed `585 passed, 1 skipped`, coverage was
+  still 100.00%, it printed `prime: unit tier GREEN`, and it **exited 0** — and
+  the declaration was red anyway, naming `gate.proof-missing` on that one proof.
+  Delete the lookahead and the gate goes green over a suite that is quietly
+  smaller than it was.
+- **`proof[].minimum` is a ratchet.** `580` is below the suite's 586 so adding
+  a test needs no edit first; `586` on `no-skip` is the exact count, so deleting
+  one test takes it under. **When you delete a test, lower nothing and raise
+  nothing — read the failure, because a red floor is the mechanism working.**
 
 ## A TIER THAT IS NOT RUN IS SAID OUT LOUD
 

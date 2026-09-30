@@ -340,6 +340,7 @@ grows is a client that has made the service's release calendar its own problem.
 $ ./bin/prime           # the whole thing
 $ ./bin/prime --fast    # the frozen install only
 $ ./bin/prime --live    # and demand the env-gated tier
+$ mise run prime        # the same file, by the fleet's spelling
 ```
 
 `bin/prime` is the one command: frozen install, `ruff format --check`, `ruff
@@ -351,6 +352,40 @@ It is **bash**, and that is load-bearing: `${PIPESTATUS[0]}` does not exist in
 zsh, which is this machine's default shell, so a gate piped into `tail` exits 0
 under zsh no matter what the gate decided. `set -euo pipefail` plus an explicit
 `${PIPESTATUS[0]}` is the mechanism, and it only exists in bash.
+
+### It is declared, not discovered
+
+`gate.yml` at the repository root states what gates this repository, against
+`cafaye/core`'s `schemas/gate.schema.json`. Read it before changing `bin/prime`,
+`mise.toml` or `.github/workflows/ci.yml` — the checker reads all three.
+
+Three things in it are load-bearing here:
+
+- **`proof[].no-skip` must not match a line that says `skipped`.** That
+  negative lookahead is the only thing between a green exit code and a suite
+  that quietly stopped running part of itself. Measured: with one test made to
+  skip, the gate printed `585 passed, 1 skipped`, coverage was still 100.00%, it
+  printed `prime: unit tier GREEN`, and it **exited 0**. The declaration was red
+  anyway, naming `gate.proof-missing` on `no-skip` alone.
+- **`proof[].minimum` is a ratchet.** `580` is below the suite's 586 so adding
+  a test does not need an edit first; `586` on `no-skip` is exact, because with
+  no `skipif` anywhere under `tests/` the difference between 586 and 585 is one
+  test that did not run. Deleting a test takes it under.
+- **`external.selfContained: false`** because `bin/prime` exits 127 without `uv`
+  on PATH and installs this repository's locked closure from PyPI on a cold
+  checkout.
+
+Check it with core's checker, which this repository does not vendor:
+
+```console
+$ ../core/harness/bin/gate-check .          # the declaration against the tree
+$ ../core/harness/bin/gate-check --prove .  # and the gate itself
+```
+
+One warning is expected and correct: `gate.requirement-unproven` on `mise`,
+because the checker refuses to run `mise install` to see whether a toolchain is
+there — an answer that depended on the machine would be red on a laptop and
+green on CI. It is reported and never acted on.
 
 ### Two tiers
 
