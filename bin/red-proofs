@@ -114,12 +114,16 @@ patch_file \
 # 2. THE TYPED FALLBACK. Remove the `or CafayeProblemError` at the end of the
 #    class selection -- the load-bearing line the brief asks for. A code this
 #    package has never heard of then finds no class at all.
+#    The substitution is `KeyError`, not an undefined name, because that is
+#    exactly the failure the brief names: "a client that raises `KeyError` on a
+#    problem type added next month is a client that breaks the day the API grows,
+#    and the reason it breaks is that nobody wrote the fallback."
 patch_file \
   "src/cafaye/_errors.py" \
   "        or _STATUS_CLASSES.get(resolved_status)
         or CafayeProblemError" \
   "        or _STATUS_CLASSES.get(resolved_status)
-        or _KeyError" \
+        or KeyError" \
   "tests/test_errors.py::TestTheTypedFallback" \
   "03-unknown-problem-type"
 

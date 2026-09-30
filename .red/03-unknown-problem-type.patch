@@ -5,4 +5,4 @@
 -        or _STATUS_CLASSES.get(resolved_status)
         or CafayeProblemError
 +        or _STATUS_CLASSES.get(resolved_status)
-        or _KeyError
+        or KeyError

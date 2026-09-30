@@ -11,7 +11,7 @@ F
 =================================== FAILURES ===================================
 _ TestTheRequestEachOperationMakes.test_a_path_parameter_is_substituted_and_never_reaches_the_body_or_query _
 
-self = <test_identity.TestTheRequestEachOperationMakes object at 0x107d50850>
+self = <test_identity.TestTheRequestEachOperationMakes object at 0x107c34850>
 
     def test_a_path_parameter_is_substituted_and_never_reaches_the_body_or_query(self) -> None:
         """``additionalProperties: false`` would reject it in the body, and a
@@ -39,6 +39,6 @@ tests/test_identity.py:301: AssertionError
 =========================== short test summary info ============================
 FAILED tests/test_identity.py::TestTheRequestEachOperationMakes::test_a_path_parameter_is_substituted_and_never_reaches_the_body_or_query
 !!!!!!!!!!!!!!!!!!!!!!!!!! stopping after 1 failures !!!!!!!!!!!!!!!!!!!!!!!!!!!
-1 failed in 0.04s
+1 failed in 0.03s
 
 # pytest exit status: 1  (non-zero is the point: this is a red proof)

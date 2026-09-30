@@ -50,7 +50,6 @@ from cafaye._client import (
     _drain,
     _internal_bug,
     _resolve_path,
-    _resolve_path as _resolve_path_again,
     _start,
 )
 from cafaye._errors import (
@@ -755,4 +754,3 @@ class TestThePathResolverIsWhereTheUrlIsDecided:
 
     def test_a_url_with_no_placeholders_and_no_parameters_is_unchanged(self) -> None:
         assert _resolve_path("https://x/v1/me", None) == ("https://x/v1/me", {})
-        assert _resolve_path_again("https://x/v1/me", None) == ("https://x/v1/me", {})

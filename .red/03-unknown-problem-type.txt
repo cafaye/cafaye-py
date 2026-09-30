@@ -11,13 +11,13 @@ F
 =================================== FAILURES ===================================
 ______ TestTheTypedFallback.test_a_reserved_code_with_no_class_of_its_own ______
 
-self = <test_errors.TestTheTypedFallback object at 0x1071991d0>
+self = <test_errors.TestTheTypedFallback object at 0x10b34d1d0>
 
     def test_a_reserved_code_with_no_class_of_its_own(self) -> None:
         error = call_and_catch(problem_response("internal", 500))
 >       assert type(error) is CafayeProblemError
-E       assert <class 'NameError'> is CafayeProblemError
-E        +  where <class 'NameError'> = type(NameError("name '_KeyError' is not defined"))
+E       AssertionError: assert <class 'TypeError'> is CafayeProblemError
+E        +  where <class 'TypeError'> = type(TypeError('KeyError() takes no keyword arguments'))
 
 tests/test_errors.py:137: AssertionError
 =========================== short test summary info ============================
