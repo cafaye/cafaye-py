@@ -1,0 +1,6 @@
+--- .red/05-redactor-word-boundary.patch ---
+--- a
++++ b
+@@ the mechanism under test, removed @@
+-    r"cafaye_[A-Za-z0-9_-]+"
++    r"\bcafaye_[A-Za-z0-9_-]+"

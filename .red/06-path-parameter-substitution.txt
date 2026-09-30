@@ -1,0 +1,44 @@
+# 06-path-parameter-substitution
+#
+# Recorded by bin/red-proofs. Reproduced by applying the patch described
+# below, running the named test, and putting the patch back.
+#
+$ git apply .red/06-path-parameter-substitution.patch   # or edit the line as the comment says
+$ uv run pytest -p no:cacheprovider --no-cov -q \
+    tests/test_identity.py::TestTheRequestEachOperationMakes::test_a_path_parameter_is_substituted_and_never_reaches_the_body_or_query
+
+F
+=================================== FAILURES ===================================
+_ TestTheRequestEachOperationMakes.test_a_path_parameter_is_substituted_and_never_reaches_the_body_or_query _
+
+self = <test_identity.TestTheRequestEachOperationMakes object at 0x107d50850>
+
+    def test_a_path_parameter_is_substituted_and_never_reaches_the_body_or_query(self) -> None:
+        """``additionalProperties: false`` would reject it in the body, and a
+        service has no reason to read it from the query.
+    
+        The two failures this test exists for are both invisible in a response: a
+        path parameter left in the query is still a 200 from a mock, and a path
+        parameter never substituted is still a 200 from a mock.
+        """
+        import httpx
+    
+        namespace, sent = self._call(
+            httpx.Response(200, json={"id": "k", "name": "n", "account_id": "acc", "user_id": "u"})
+        )
+        namespace.mint_api_key(account_id="acc_1", name="n", scopes=["invoices:read"])
+>       assert sent[0].url.path == "/v1/accounts/acc_1/api-keys"
+E       AssertionError: assert '/v1/accounts..._id}/api-keys' == '/v1/accounts/acc_1/api-keys'
+E         
+E         - /v1/accounts/acc_1/api-keys
+E         ?                  ^
+E         + /v1/accounts/{account_id}/api-keys
+E         ?              +   ++++ ^^^
+
+tests/test_identity.py:301: AssertionError
+=========================== short test summary info ============================
+FAILED tests/test_identity.py::TestTheRequestEachOperationMakes::test_a_path_parameter_is_substituted_and_never_reaches_the_body_or_query
+!!!!!!!!!!!!!!!!!!!!!!!!!! stopping after 1 failures !!!!!!!!!!!!!!!!!!!!!!!!!!!
+1 failed in 0.04s
+
+# pytest exit status: 1  (non-zero is the point: this is a red proof)

@@ -1,0 +1,73 @@
+# 05-redactor-word-boundary
+#
+# Recorded by bin/red-proofs. Reproduced by applying the patch described
+# below, running the named test, and putting the patch back.
+#
+$ git apply .red/05-redactor-word-boundary.patch   # or edit the line as the comment says
+$ uv run pytest -p no:cacheprovider --no-cov -q \
+    tests/test_redact.py::TestStructuralShapesAreRemovedWithoutTheClientKnowingThem
+
+..............F
+=================================== FAILURES ===================================
+_ TestStructuralShapesAreRemovedWithoutTheClientKnowingThem.test_a_token_concatenated_onto_something_is_still_a_token[after-a-letter] _
+
+self = <test_redact.TestStructuralShapesAreRemovedWithoutTheClientKnowingThem object at 0x10bc6b890>
+template = 'x{token}'
+
+    @pytest.mark.parametrize(
+        "template",
+        [
+            "{token}",
+            "x{token}",
+            "1{token}",
+            "prefix_{token}",
+            "https://api.cafaye.com/{token}",
+            "?token={token}",
+            "token={token}",
+            '"Authorization": Bearer {token}',
+            "{token}{token}",
+        ],
+        ids=[
+            "alone",
+            "after-a-letter",
+            "after-a-digit",
+            "after-an-underscore",
+            "in-a-url-path",
+            "in-a-query-string",
+            "in-a-json-value",
+            "after-a-quote",
+            "twice",
+        ],
+    )
+    def test_a_token_concatenated_onto_something_is_still_a_token(self, template: str) -> None:
+        """The regression for the word boundary, and the sharpest one in this file.
+    
+        ``CREDENTIAL_SHAPES`` used to begin ``\\bcafaye_``. A word boundary asserts a
+        word/non-word transition, so that prefix matched a bare token and a token
+        after a ``/``, a ``?`` or a space — and silently failed on a token preceded
+        by any word character. ``xcafaye_...``, ``1cafaye_...``, ``prefix_cafaye_...``
+        all sailed through.
+    
+        A credential glued onto something is not the exotic case, it is the ordinary
+        one: a proxy URL with it in the path, a log line that interpolated it into an
+        identifier, a cursor that embedded it. The ``cafaye_`` prefix is seven
+        characters identity chose precisely so a leaked credential is recognisable
+        at sight, and anchoring it behind a word boundary discarded that for the
+        shapes that matter most.
+    
+        Run with **no** configured secrets, so the only thing that can catch these
+        is the structural pattern.
+        """
+>       assert redact_text()(template.format(token=f"cafaye_{'x' * 43}")) == REDACTED
+E       AssertionError: assert 'xcafaye_xxxx...xxxxxxxxxxxxx' == '[redacted: a... was present]'
+E         
+E         - [redacted: a credential-shaped value was present]
+E         + xcafaye_xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
+
+tests/test_redact.py:194: AssertionError
+=========================== short test summary info ============================
+FAILED tests/test_redact.py::TestStructuralShapesAreRemovedWithoutTheClientKnowingThem::test_a_token_concatenated_onto_something_is_still_a_token[after-a-letter]
+!!!!!!!!!!!!!!!!!!!!!!!!!! stopping after 1 failures !!!!!!!!!!!!!!!!!!!!!!!!!!!
+1 failed, 14 passed in 0.07s
+
+# pytest exit status: 1  (non-zero is the point: this is a red proof)

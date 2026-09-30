@@ -1,0 +1,6 @@
+--- .red/02-base-url-precedence.patch ---
+--- a
++++ b
+@@ the mechanism under test, removed @@
+-        (_present(explicit), SOURCE_ARGUMENT),
++        (None, SOURCE_ARGUMENT),

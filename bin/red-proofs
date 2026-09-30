@@ -1,0 +1,169 @@
+#!/usr/bin/env bash
+#
+# Capture the red proofs REPORT-cafaye-py-01.md quotes.
+#
+# Each one is a real run of a real test with a real mechanism removed, and each
+# one is recorded because the fleet keeps them: a red proof is the difference
+# between "this test would catch it" and "this test caught it".
+#
+# The method is the same for all five. Patch one line, run one test, record the
+# output, put the line back, and **verify the restore by diffing**. A red-proof
+# harness that leaves the tree modified is worse than no harness, because the
+# next reader cannot tell which state the tree was in.
+#
+# `set -euo pipefail` and an explicit `${PIPESTATUS[0]}`: this runs under zsh by
+# default on this machine, and a piped status under zsh is the status of `tail`.
+set -euo pipefail
+
+REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+cd "$REPO_ROOT"
+
+RED_DIR="$REPO_ROOT/.red"
+mkdir -p "$RED_DIR"
+
+# The paths that matter, and deliberately **not** `.red/`: the proofs this
+# script writes are themselves new files, so a whole-tree comparison would
+# always report a change and always be right to do so.
+SCOPE="-- src tests live bin pyproject.toml mise.toml"
+BEFORE_STATE="$(git status --porcelain $SCOPE)"
+
+record() {
+  local name="$1"
+  local test="$2"
+  local out
+  out="$(mktemp)"
+  # `-p no:cacheprovider` so a red run does not leave a cache describing a tree
+  # that is about to change back.
+  set +e
+  uv run pytest -p no:cacheprovider --no-cov -q "$test" >"$out" 2>&1
+  local code=$?
+  set -e
+
+  {
+    echo "# $name"
+    echo "#"
+    echo "# Recorded by bin/red-proofs. Reproduced by applying the patch described"
+    echo "# below, running the named test, and putting the patch back."
+    echo "#"
+    echo "\$ git apply .red/$name.patch   # or edit the line as the comment says"
+    echo "\$ uv run pytest -p no:cacheprovider --no-cov -q \\"
+    echo "    $test"
+    echo
+    cat "$out"
+    echo
+    echo "# pytest exit status: $code  (non-zero is the point: this is a red proof)"
+  } >"$RED_DIR/$name.txt"
+
+  rm -f "$out"
+  echo "  $name -> exit $code"
+}
+
+# --- helpers that patch, run, and restore ----------------------------------
+patch_file() {
+  local file="$1" old="$2" new="$3" test="$4" name="$5"
+  local backup
+  backup="$(mktemp)"
+  cp "$file" "$backup"
+
+  python3 - "$file" "$old" "$new" <<'PATCH'
+import pathlib
+import sys
+
+path, old, new = sys.argv[1], sys.argv[2], sys.argv[3]
+text = pathlib.Path(path).read_text()
+if text.count(old) != 1:
+    sys.exit(f"red-proof: expected exactly one occurrence of {old!r} in {path}")
+pathlib.Path(path).write_text(text.replace(old, new))
+PATCH
+
+  echo "$name:"
+  {
+    echo "--- .red/$name.patch ---"
+    echo "--- a"
+    echo "+++ b"
+    echo "@@ the mechanism under test, removed @@"
+    echo "-$old"
+    echo "+$new"
+  } >"$RED_DIR/$name.patch"
+
+  record "$name" "$test"
+
+  # Restore, then *verify* the restore, and only then discard the backup. The
+  # order matters: diffing before the copy, or after the `rm`, would report a
+  # failure that is really the harness deleting its own evidence.
+  cp "$backup" "$file"
+  if ! diff -q "$file" "$backup" >/dev/null; then
+    echo "red-proof: $file was not restored cleanly" >&2
+    diff "$backup" "$file" >&2 || true
+    exit 1
+  fi
+  rm -f "$backup"
+}
+
+echo "==> capturing red proofs into .red/"
+
+# 1. AUTH PRECEDENCE. Remove the explicit argument from the candidate list, so
+#    `base_url=` stops winning and the environment variable answers instead.
+patch_file \
+  "src/cafaye/_base_url.py" \
+  "        (_present(explicit), SOURCE_ARGUMENT)," \
+  "        (None, SOURCE_ARGUMENT)," \
+  "tests/test_base_url.py::TestExplicitWins" \
+  "02-base-url-precedence"
+
+# 2. THE TYPED FALLBACK. Remove the `or CafayeProblemError` at the end of the
+#    class selection -- the load-bearing line the brief asks for. A code this
+#    package has never heard of then finds no class at all.
+patch_file \
+  "src/cafaye/_errors.py" \
+  "        or _STATUS_CLASSES.get(resolved_status)
+        or CafayeProblemError" \
+  "        or _STATUS_CLASSES.get(resolved_status)
+        or _KeyError" \
+  "tests/test_errors.py::TestTheTypedFallback" \
+  "03-unknown-problem-type"
+
+# 3. THE CREDENTIAL LEAK. Make the redactor a pass-through, which is the
+#    "careful implementation" the module docstring argues against: replace what
+#    you recognise, return the rest.
+patch_file \
+  "src/cafaye/_redact.py" \
+  "    def redact(value: object) -> str:" \
+  "    def redact(value: object) -> str:
+        return str(value)  # noqa: RET504
+        #" \
+  "tests/test_credential_leak.py" \
+  "04-credential-leak"
+
+# 4. THE WORD-BOUNDARY REDACTOR BUG. The real defect this packet found, put
+#    back so the regression test that covers it is proven to be the thing that
+#    catches it.
+patch_file \
+  "src/cafaye/_redact.py" \
+  '    r"cafaye_[A-Za-z0-9_-]+"' \
+  '    r"\bcafaye_[A-Za-z0-9_-]+"' \
+  "tests/test_redact.py::TestStructuralShapesAreRemovedWithoutTheClientKnowingThem" \
+  "05-redactor-word-boundary"
+
+# 5. THE PATH-PARAMETER SUBSTITUTION. The real defect, put back. httpx does
+#    not substitute `{name}` in a path, and this is the line that used to claim
+#    it did.
+patch_file \
+  "src/cafaye/_client.py" \
+  "        url, query = _resolve_path(f\"{self._base_urls[service]}{path}\", params)" \
+  "        url, query = f\"{self._base_urls[service]}{path}\", dict(params or {})" \
+  "tests/test_identity.py::TestTheRequestEachOperationMakes::test_a_path_parameter_is_substituted_and_never_reaches_the_body_or_query" \
+  "06-path-parameter-substitution"
+
+# --- the tree must be exactly as we found it -------------------------------
+AFTER_STATE="$(git status --porcelain $SCOPE)"
+if [ "$BEFORE_STATE" != "$AFTER_STATE" ]; then
+  echo "red-proof: the working tree changed and did not come back:" >&2
+  diff <(printf '%s\n' "$BEFORE_STATE") <(printf '%s\n' "$AFTER_STATE") >&2 || true
+  exit 1
+fi
+
+echo
+echo "==> $(ls -1 "$RED_DIR"/*.txt | wc -l | tr -d ' ') red proofs in .red/, and the working tree is unchanged."
+echo "==> the proofs are not a gate. They are evidence, and they are not re-run"
+echo "==> by bin/prime because each one requires deliberately breaking the code."

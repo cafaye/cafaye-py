@@ -1,0 +1,28 @@
+# 03-unknown-problem-type
+#
+# Recorded by bin/red-proofs. Reproduced by applying the patch described
+# below, running the named test, and putting the patch back.
+#
+$ git apply .red/03-unknown-problem-type.patch   # or edit the line as the comment says
+$ uv run pytest -p no:cacheprovider --no-cov -q \
+    tests/test_errors.py::TestTheTypedFallback
+
+F
+=================================== FAILURES ===================================
+______ TestTheTypedFallback.test_a_reserved_code_with_no_class_of_its_own ______
+
+self = <test_errors.TestTheTypedFallback object at 0x1071991d0>
+
+    def test_a_reserved_code_with_no_class_of_its_own(self) -> None:
+        error = call_and_catch(problem_response("internal", 500))
+>       assert type(error) is CafayeProblemError
+E       assert <class 'NameError'> is CafayeProblemError
+E        +  where <class 'NameError'> = type(NameError("name '_KeyError' is not defined"))
+
+tests/test_errors.py:137: AssertionError
+=========================== short test summary info ============================
+FAILED tests/test_errors.py::TestTheTypedFallback::test_a_reserved_code_with_no_class_of_its_own
+!!!!!!!!!!!!!!!!!!!!!!!!!! stopping after 1 failures !!!!!!!!!!!!!!!!!!!!!!!!!!!
+1 failed in 0.03s
+
+# pytest exit status: 1  (non-zero is the point: this is a red proof)

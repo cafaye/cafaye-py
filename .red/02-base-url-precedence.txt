@@ -1,0 +1,36 @@
+# 02-base-url-precedence
+#
+# Recorded by bin/red-proofs. Reproduced by applying the patch described
+# below, running the named test, and putting the patch back.
+#
+$ git apply .red/02-base-url-precedence.patch   # or edit the line as the comment says
+$ uv run pytest -p no:cacheprovider --no-cov -q \
+    tests/test_base_url.py::TestExplicitWins
+
+F
+=================================== FAILURES ===================================
+_____ TestExplicitWins.test_explicit_beats_the_environment_and_the_default _____
+
+self = <test_base_url.TestExplicitWins object at 0x109d59090>
+
+    def test_explicit_beats_the_environment_and_the_default(self) -> None:
+        resolved = resolve_base_url(
+            "identity",
+            explicit=EXPLICIT,
+            env={BASE_URL_ENV: FROM_ENV},
+        )
+>       assert resolved.url == EXPLICIT
+E       AssertionError: assert 'https://from....example.test' == 'https://expl....example.test'
+E         
+E         - https://explicit.example.test
+E         ?          ^^^^^^^
+E         + https://from-env.example.test
+E         ?         +++++ ^^
+
+tests/test_base_url.py:49: AssertionError
+=========================== short test summary info ============================
+FAILED tests/test_base_url.py::TestExplicitWins::test_explicit_beats_the_environment_and_the_default
+!!!!!!!!!!!!!!!!!!!!!!!!!! stopping after 1 failures !!!!!!!!!!!!!!!!!!!!!!!!!!!
+1 failed in 0.03s
+
+# pytest exit status: 1  (non-zero is the point: this is a red proof)

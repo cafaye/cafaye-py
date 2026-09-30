@@ -1,0 +1,8 @@
+--- .red/03-unknown-problem-type.patch ---
+--- a
++++ b
+@@ the mechanism under test, removed @@
+-        or _STATUS_CLASSES.get(resolved_status)
+        or CafayeProblemError
++        or _STATUS_CLASSES.get(resolved_status)
+        or _KeyError

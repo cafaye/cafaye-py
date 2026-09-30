@@ -1,0 +1,6 @@
+--- .red/06-path-parameter-substitution.patch ---
+--- a
++++ b
+@@ the mechanism under test, removed @@
+-        url, query = _resolve_path(f"{self._base_urls[service]}{path}", params)
++        url, query = f"{self._base_urls[service]}{path}", dict(params or {})
