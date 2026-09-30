@@ -29,6 +29,7 @@ from cafaye import (
     SESSION_COOKIE_NAME,
     Cafaye,
     CafayeConfigurationError,
+    CredentialKind,
     classify_credential,
 )
 
@@ -40,7 +41,9 @@ from cafaye import (
 FAKE_API_TOKEN = API_TOKEN_PREFIX + "TESTONLY-not-a-real-token-TESTONLY-000000"
 FAKE_SESSION_TOKEN = "TESTONLY-not-a-real-session-000000000000000"
 FAKE_JWT = "{}.{}.{}".format(
-    base64.urlsafe_b64encode(json.dumps({"alg": "ES256", "kid": "cafaye-1"}).encode()).decode().rstrip("="),
+    base64.urlsafe_b64encode(json.dumps({"alg": "ES256", "kid": "cafaye-1"}).encode())
+    .decode()
+    .rstrip("="),
     "TESTONLY" + "0" * 78,
     "TESTONLY" + "0" * 43,
 )
@@ -50,6 +53,24 @@ BASE = "https://identity.example.test"
 
 def client_for(token: str | None) -> Cafaye:
     return Cafaye(base_url=BASE, token=token)
+
+
+def kind_of(client: Cafaye) -> CredentialKind | None:
+    """Read a client's credential kind **fresh**, through a call.
+
+    Not a wrapper for tidiness. ``mypy`` narrows ``client.credential_kind`` at
+    the first assertion about it and does not invalidate that narrowing after
+    ``set_token``, because it assumes a property is pure. So a test that asserts
+    on the attribute twice around a ``set_token`` has its second assertion
+    checked against a type the checker still believes in, and mypy -- with
+    ``--warn-unreachable``, which this repository turns on deliberately -- reports
+    the assertion as impossible and every statement after it as unreachable.
+
+    The narrowing is stale and the test is right. Reading through a function call
+    is what stops the checker carrying it across, and the comment is here so the
+    next reader does not "simplify" it back into a direct attribute access.
+    """
+    return client.credential_kind
 
 
 def sent_headers(client: Cafaye, token: str | None = None) -> httpx.Headers:
@@ -136,7 +157,7 @@ class TestSessionCookie:
     def test_a_session_token_is_sent_as_the_host_cookie(self) -> None:
         headers = sent_headers(client_for(FAKE_SESSION_TOKEN))
         assert SESSION_COOKIE_NAME == "__Host-session"
-        assert f"cookie" in {key.lower() for key in headers}
+        assert "cookie" in {key.lower() for key in headers}
         assert headers["cookie"] == f"{SESSION_COOKIE_NAME}={FAKE_SESSION_TOKEN}"
 
     def test_a_session_token_is_also_sent_as_a_bearer(self) -> None:
@@ -170,18 +191,27 @@ class TestNoCredential:
         assert "cookie" not in headers
 
     def test_credentials_can_be_set_and_cleared_on_a_live_client(self) -> None:
-        """A long-running process outlives its token."""
+        """A long-running process outlives its token.
+
+        Read through :func:`kind_of` rather than off the attribute, and compare
+        against the **string** rather than the enum member, so the assertion is
+        that ``CredentialKind``'s value is the name a caller would compare to and
+        not merely that the right member came back. See :func:`kind_of` for why
+        the indirection is load-bearing rather than decorative.
+        """
         client = client_for(None)
-        assert client.credential_kind is None
+        assert kind_of(client) is None
 
         client.set_token(FAKE_API_TOKEN)
-        assert client.credential_kind == "api_token"
+        assert kind_of(client) == "api_token"
+        assert kind_of(client) is CredentialKind.API_TOKEN
 
         client.set_token(FAKE_SESSION_TOKEN)
-        assert client.credential_kind == "session"
+        assert kind_of(client) == "session"
+        assert kind_of(client) is CredentialKind.SESSION
 
         client.set_token(None)
-        assert client.credential_kind is None
+        assert kind_of(client) is None
 
     def test_a_credential_set_after_construction_is_used(self) -> None:
         client = client_for(None)

@@ -50,8 +50,8 @@ import logging
 import sys
 import traceback
 from collections.abc import Iterator
-from contextlib import contextmanager
-from typing import Any
+from contextlib import contextmanager, suppress
+from typing import Any, ClassVar
 
 import httpx
 import pytest
@@ -61,7 +61,6 @@ from cafaye import (
     Cafaye,
     CafayeConfigurationError,
     CafayeNetworkError,
-    CafayeProblemError,
     CafayeProtocolError,
 )
 
@@ -88,6 +87,12 @@ FAKE_JWT = (
 ALL_FAKE_CREDENTIALS = (FAKE_API_TOKEN, FAKE_SESSION_TOKEN, FAKE_JWT)
 COOKIE_HEADER_LINE = f"__Host-session={FAKE_SESSION_TOKEN}"
 
+#: Modules this package must not import, at all, in any file. Named once so
+#: the `import x` arm and the `from x import y` arm of the AST walk below
+#: cannot disagree about the list -- a scan that checks one spelling of an
+#: import and not the other is a scan with a hole shaped like a keyword.
+FORBIDDEN_MODULES = frozenset({"logging", "warnings", "subprocess"})
+
 
 def assert_no_credential(label: str, text: str) -> None:
     """The one assertion this file is made of, named so a failure says which."""
@@ -96,7 +101,9 @@ def assert_no_credential(label: str, text: str) -> None:
     assert FAKE_SESSION_TOKEN not in text, f"{label} leaked the session token"
 
 
-def every_string_in(value: Any, seen: set[int] | None = None, out: list[str] | None = None) -> list[str]:
+def every_string_in(
+    value: Any, seen: set[int] | None = None, out: list[str] | None = None
+) -> list[str]:
     """Every string reachable from a value, however a log formatter would find it.
 
     Own attributes are walked whether or not they are enumerable, because an
@@ -114,20 +121,21 @@ def every_string_in(value: Any, seen: set[int] | None = None, out: list[str] | N
         out.append(value)
         return out
     if isinstance(value, (bytes, bytearray)):
-        try:
+        # `suppress`, not `try`/`except`/`pass`: "this value contributes nothing"
+        # is the assertion, not an oversight, and `errors="replace"` is what makes
+        # the arm unreachable in the first place.
+        with suppress(Exception):
             out.append(value.decode("utf-8", "replace"))
-        except Exception:  # pragma: no cover - decode with replace cannot raise
-            pass
         return out
     marker = id(value)
     if marker in seen:
         return out
     seen.add(marker)
 
-    try:
+    # A `__str__` that raises contributes nothing. Reading the attribute is the
+    # whole job of this walker, so it must not be the thing that fails.
+    with suppress(Exception):
         out.append(str(value))
-    except Exception:  # noqa: BLE001 - a __str__ that raises contributes nothing
-        pass
 
     if isinstance(value, BaseException):
         for attribute in ("args", "message", "detail", "title", "type", "instance", "code"):
@@ -139,7 +147,7 @@ def every_string_in(value: Any, seen: set[int] | None = None, out: list[str] | N
         for chained in (cause, context):
             if isinstance(chained, BaseException):
                 every_string_in(chained, seen, out)
-        for key, attribute_value in list(vars(value).items()) if vars(value) else []:
+        for attribute_value in list(vars(value).values()):
             every_string_in(attribute_value, seen, out)
         return out
 
@@ -227,7 +235,7 @@ def probe_one(label: str, client: Cafaye, token: str | None) -> None:
     assert_no_credential(f"{label}: str()", str(error))
     assert_no_credential(
         f"{label}: json.dumps",
-        json.dumps(error, default=lambda value: repr(value), sort_keys=True),
+        json.dumps(error, default=repr, sort_keys=True),
     )
 
     # 3. The traceback, formatted the way a crash reporter formats it — which
@@ -328,14 +336,14 @@ class TestTheErrorPaths:
             content=f"<html><body>upstream saw {COOKIE_HEADER_LINE}</body></html>".encode(),
             headers={"content-type": "text/html"},
         )
-        probe_one("proxy html", client_returning(response, token=FAKE_SESSION_TOKEN), FAKE_SESSION_TOKEN)
+        probe_one(
+            "proxy html", client_returning(response, token=FAKE_SESSION_TOKEN), FAKE_SESSION_TOKEN
+        )
 
     def test_a_transport_error_whose_message_echoes_the_token(self) -> None:
         """The cause chain, which is why the original is withheld rather than scrubbed."""
         failure = httpx.ConnectError(f"connect failed presenting {FAKE_API_TOKEN}")
-        probe_one(
-            "connect error", client_returning(failure, token=FAKE_API_TOKEN), FAKE_API_TOKEN
-        )
+        probe_one("connect error", client_returning(failure, token=FAKE_API_TOKEN), FAKE_API_TOKEN)
 
     def test_a_200_that_carries_a_problem_echoing_the_token(self) -> None:
         response = httpx.Response(
@@ -369,9 +377,10 @@ class TestTheConfigurationPath:
     """
 
     def test_a_refused_credential_is_not_quoted_in_the_message(self) -> None:
-        with capturing_everything() as (records, out, err), pytest.raises(
-            CafayeConfigurationError
-        ) as caught:
+        with (
+            capturing_everything() as (records, out, err),
+            pytest.raises(CafayeConfigurationError) as caught,
+        ):
             Cafaye(base_url="https://identity.example.test", token=FAKE_API_TOKEN + "\n")
         error = caught.value
         assert_no_credential("config: message", str(error))
@@ -497,12 +506,12 @@ class TestEveryErrorClassIsClean:
 
         mapped = problem_error_from(
             body={
-                    "type": "https://errors.cafaye.com/forbidden",
-                    "title": f"Authorization: Bearer {FAKE_API_TOKEN}",
-                    "status": 403,
-                    "detail": f"the cookie was {COOKIE_HEADER_LINE}",
-                    "code": "forbidden",
-                    "echo": FAKE_API_TOKEN,
+                "type": "https://errors.cafaye.com/forbidden",
+                "title": f"Authorization: Bearer {FAKE_API_TOKEN}",
+                "status": 403,
+                "detail": f"the cookie was {COOKIE_HEADER_LINE}",
+                "code": "forbidden",
+                "echo": FAKE_API_TOKEN,
             },
             status=403,
             operation="identity.get_current_user",
@@ -583,7 +592,7 @@ class TestTheStaticHalf:
     logging costs nothing and a call in a branch no test covers still fails.
     """
 
-    FORBIDDEN_CALLS = {
+    FORBIDDEN_CALLS: ClassVar[set[str]] = {
         "print",
         "logging.info",
         "logging.debug",
@@ -654,11 +663,14 @@ class TestTheStaticHalf:
             for node in ast.walk(tree):
                 if isinstance(node, ast.Import):
                     for alias in node.names:
-                        if alias.name.split(".")[0] in {"logging", "warnings", "subprocess"}:
+                        if alias.name.split(".")[0] in FORBIDDEN_MODULES:
                             offenders.append(f"{alias.name} at {path.name}:{node.lineno}")
-                elif isinstance(node, ast.ImportFrom) and node.module:
-                    if node.module.split(".")[0] in {"logging", "warnings", "subprocess"}:
-                        offenders.append(f"{node.module} at {path.name}:{node.lineno}")
+                elif (
+                    isinstance(node, ast.ImportFrom)
+                    and node.module
+                    and node.module.split(".")[0] in FORBIDDEN_MODULES
+                ):
+                    offenders.append(f"{node.module} at {path.name}:{node.lineno}")
         assert not offenders, "the package must not import a logging module: " + ", ".join(
             offenders
         )
@@ -680,7 +692,9 @@ class TestNoTokenOnAVirologistArgument:
     passes one cannot end up sending one it found in ``CAFAYE_TOKEN``.
     """
 
-    def test_no_credential_is_read_from_the_environment(self, monkeypatch: pytest.MonkeyPatch) -> None:
+    def test_no_credential_is_read_from_the_environment(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
         for name in ("CAFAYE_TOKEN", "CAFAYE_API_KEY", "CAFAYE_API_TOKEN", "CAFAYE_SESSION_TOKEN"):
             monkeypatch.setenv(name, FAKE_API_TOKEN)
         client = Cafaye(base_url="https://identity.example.test")

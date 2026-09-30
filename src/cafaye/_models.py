@@ -27,8 +27,9 @@ accident.
 
 from __future__ import annotations
 
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
-from typing import Any, Mapping, Sequence, TypeVar
+from typing import Any, TypeVar
 
 __all__ = [
     "ApiKey",
@@ -56,13 +57,24 @@ class _Model:
 
     @classmethod
     def from_response(cls: type[ModelT], body: Mapping[str, Any]) -> ModelT:
-        """Build from a decoded JSON object.
+        """Build this model from a decoded JSON object. Every model implements it.
 
         Each model does its own field-by-field coercion, because the coercions
         differ per field and a generic helper that hid them would be a place where
         a service's real shape quietly stopped mattering.
+
+        This raises rather than guessing. The previous body called
+        ``cls.from_mapping(body)``, and no model has a ``from_mapping`` — the
+        module-level function of that name takes a body and returns a mapping, it
+        is not a classmethod. So the one method every model inherited was an
+        ``AttributeError`` with no message, reachable by any code that called it
+        on the base class. Unreachable from the twenty models, which all override
+        it, which is why 78% coverage and a green suite had not found it.
         """
-        return cls.from_mapping(body)
+        raise NotImplementedError(
+            f"{cls.__name__} does not implement from_response. Every model in "
+            "cafaye._models declares its own; this base exists to say so."
+        )
 
 
 def _str(body: Mapping[str, Any], key: str, *, default: str = "") -> str:
@@ -101,7 +113,7 @@ def _str_list(body: Mapping[str, Any], key: str) -> tuple[str, ...]:
     return tuple(item for item in value if isinstance(item, str))
 
 
-def from_mapping(body: Mapping[str, Any]) -> Mapping[str, Any]:
+def from_mapping(body: object) -> Mapping[str, Any]:
     """Return ``body`` unchanged, or ``{}`` when it is not a mapping.
 
     The one shared guard. Every ``from_response`` calls it, so a service that

@@ -150,6 +150,18 @@ enable_error_code = ["ignore-without-code", "redundant-expr", "truthy-bool"]
 # first one's; the format is also stable configuration, which is what this gate
 # needs — `ruff format` is not going to move a file's shape under a patch
 # release the way a tool with an "experimental" formatter flag can.
+# pytest puts the test directory on `sys.path` itself, which is why the suite can
+# say `from conftest import sync_client` rather than `from .conftest import ...`.
+# mypy does not model that, and the two alternative fixes are both worse: adding
+# `tests` to `mypy_path` makes mypy find the file under two module names at once
+# and refuse to check anything, and an `__init__.py` in `tests/` would be a claim
+# about the package's import shape that is false. So the one unresolvable name is
+# named here, and only that: `tests/conftest.py` is still checked, as
+# `tests.conftest`.
+[[tool.mypy.overrides]]
+module = "conftest"
+ignore_missing_imports = true
+
 [tool.ruff]
 line-length = 100
 target-version = "py311"
@@ -204,15 +216,45 @@ ignore = [
   "TRY003",
   # `EM101`/`TRY400` — same reason; the string IS the message.
   "EM101",
+  # `PLC0415` — import-outside-top-level. Every one of the twenty in this tree
+  # is deliberate, in one of two ways. `_client.py` defers
+  # `from ._services.identity import IdentityService` into the constructor
+  # because the dependency is genuinely circular — a service module needs the
+  # client's base class to type its operations and the client needs the service
+  # class to expose the property, and the deferred import is the one point where
+  # the cycle is provably finished. The rest are in tests, which import
+  # `socket`/`ssl`/`asyncio`/`json` inside the one test that uses them so the
+  # test reads as a single story about one failure shape rather than as a
+  # dependency the reader has to hold in their head. Twenty `noqa` comments
+  # asserting twenty individual decisions would be worse than one stated rule.
+  "PLC0415",
+  # `PLR0911`/`PLR0912` — too many returns / branches. Both are a flat
+  # *classifier* (`classify_network_failure`, which is the "one readable table of
+  # httpx's shapes" the module docstring promises) and a recursive *walker*
+  # (`every_string_in`, whose whole job is to visit every shape). Flatness is the
+  # property being bought in both: a nested version of either is harder to audit
+  # against the list of shapes it is supposed to cover.
+  "PLR0911",
+  "PLR0912",
 ]
 
 [tool.ruff.lint.per-file-ignores]
 # Tests use `assert` (above) and legitimately reach into private members to
 # assert on internals, and pytest fixtures are named for their fixtures.
-"tests/*" = ["S105", "S106", "S311", "PLR2004", "ARG001", "ARG002", "N802"]
+# `S104` is the loopback-address rule, and `tests/test_base_url.py`'s
+# `LOOPBACKS` tuple is the assertion that nothing in this package can ever
+# resolve to one — which is the opposite of binding to all interfaces.
 # `print` is the point of a CLI example, and the credential-leak test asserts
 # that none of them run.
+"tests/*" = ["S105", "S106", "S311", "PLR2004", "ARG001", "ARG002", "N802", "S104"]
 "tests/test_credential_leak.py" = ["T201"]
+# `S105` is "a string that looks like a secret". This module's two hits are
+# `API_TOKEN_PREFIX = "cafaye_"` — the *discriminator* identity itself reads, and
+# the reason a leaked token is recognisable by its first seven characters — and
+# the `API_TOKEN` member of `CredentialKind`. A prefix is not a credential, and a
+# flag that says "there is no credential here" is the opposite of a hardcoded
+# password.
+"src/cafaye/_credentials.py" = ["S105"]
 
 [tool.ruff.lint.flake8-tidy-imports]
 ban-relative-imports = "parents"

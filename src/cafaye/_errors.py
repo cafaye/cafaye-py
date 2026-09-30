@@ -130,15 +130,15 @@ import ssl
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from enum import StrEnum
-from typing import ClassVar
+from typing import ClassVar, TypeGuard
 
 import httpx
 
 from ._redact import REDACTED, Redactor, redact_text
 
 __all__ = [
-    "CafayeConflictError",
     "CafayeConfigurationError",
+    "CafayeConflictError",
     "CafayeError",
     "CafayeForbiddenError",
     "CafayeIdempotencyKeyReusedError",
@@ -284,6 +284,7 @@ class CafayeProblemError(CafayeError):
         trace_id: str | None = None,
         errors: Sequence[FieldError] | None = None,
         extensions: Mapping[str, object] | None = None,
+        content_type: str | None = None,
         operation: str | None = None,
     ) -> None:
         super().__init__(message, kind=ErrorKind.PROBLEM, status=status)
@@ -309,6 +310,9 @@ class CafayeProblemError(CafayeError):
         )
         #: Every member that is not one of the eight the fleet defines.
         self.extensions: Mapping[str, object] = dict(extensions or {})
+        #: The ``Content-Type`` the service sent. A problem document arriving as
+        #: ``text/html`` is a proxy, and this is the field that says so.
+        self.content_type = content_type
         #: The service and operation the call was made through, for the log line.
         self.operation = operation
 
@@ -445,7 +449,7 @@ def is_cafaye_error(value: object) -> bool:
 # ---------------------------------------------------------------------------
 
 
-def looks_like_problem(value: object) -> bool:
+def looks_like_problem(value: object) -> TypeGuard[Mapping[str, object]]:
     """Does this body look like an RFC 9457 problem document?
 
     Structural, and deliberately so: ``type`` and ``title`` are the two members
@@ -683,19 +687,22 @@ def problem_error_from(
 
     where = f"{operation}: " if operation else ""
     suffix = f" {code}" if code is not None else ""
-    message = redact(f"{where}{resolved_status}{suffix} — {title}{'' if not detail else f': {detail}'}")
+    message = redact(
+        f"{where}{resolved_status}{suffix} — {title}{'' if not detail else f': {detail}'}"
+    )
 
     return klass(
         message,
         type=type_uri,
         title=title,
         status=resolved_status,
-        detail=detail,
-        instance=instance,
+        detail=detail or "",
+        instance=instance or "",
         code=code,
         trace_id=resolved_trace,
         errors=field_errors,
         extensions=extensions,
+        content_type=content_type,
         operation=operation,
     )
 

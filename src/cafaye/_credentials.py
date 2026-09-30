@@ -133,11 +133,13 @@ def classify_credential(token: str) -> CredentialKind:
     Raises:
         CafayeConfigurationError: for an empty, blank or control-character value.
     """
-    if not isinstance(token, str) or not token:
+    if not token:
         raise CafayeConfigurationError(
             "A cafaye credential must be a non-empty string. Refusing it here rather than "
             "sending it: a blank one is a configuration mistake that would otherwise surface "
-            "as a 401 from a service some hours later.",
+            "as a 401 from a service some hours later. A value that is not a string at all is "
+            "a caller type error and is left to the type checker -- the next line is a "
+            "control-character check, which is the one that has security consequences.",
             source="token",
         )
     bad = sorted({character for character in token if character in _FORBIDDEN_IN_CREDENTIAL})

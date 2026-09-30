@@ -19,7 +19,6 @@ from collections.abc import Callable, Coroutine, Mapping
 from typing import Any, TypeVar
 
 import httpx
-import pytest
 
 from cafaye import AsyncCafaye, Cafaye
 

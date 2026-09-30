@@ -21,8 +21,8 @@ import httpx
 import pytest
 
 from cafaye import (
-    CafayeConflictError,
     CafayeConfigurationError,
+    CafayeConflictError,
     CafayeError,
     CafayeForbiddenError,
     CafayeIdempotencyKeyReusedError,
@@ -55,7 +55,7 @@ RESERVED_CODES = [
 
 def call_and_catch(response: httpx.Response) -> BaseException:
     client, _ = sync_client(response)
-    with pytest.raises(Exception) as caught:  # noqa: B017 - narrowed by the asserts
+    with pytest.raises(Exception) as caught:
         client.identity.get_current_user()
     return caught.value
 
@@ -112,7 +112,9 @@ class TestOneClassPerReservedCode:
         RESERVED_CODES,
         ids=[code for code, _, _ in RESERVED_CODES],
     )
-    def test_the_message_carries_the_operation(self, code: str, status: int, expected: type) -> None:
+    def test_the_message_carries_the_operation(
+        self, code: str, status: int, expected: type
+    ) -> None:
         """The log line names which call failed, which is half of diagnosing it."""
         error = call_and_catch(problem_response(code, status))
         assert "identity.get_current_user" in str(error)
@@ -255,11 +257,13 @@ class TestProblemMembersAndExtensions:
         error = call_and_catch(
             problem_response("conflict", 409, retry_after_seconds=30, remediation={"url": "/v1/x"})
         )
+        assert isinstance(error, CafayeProblemError)
         assert error.extensions["retry_after_seconds"] == 30
         assert error.extensions["remediation"] == {"url": "/v1/x"}
 
     def test_known_members_are_not_duplicated_into_extensions(self) -> None:
         error = call_and_catch(problem_response("not_found", 404))
+        assert isinstance(error, CafayeProblemError)
         for member in ("type", "title", "status", "detail", "instance", "code", "trace_id"):
             assert member not in error.extensions
 
@@ -288,6 +292,7 @@ class TestNonProblemFailures:
             headers={"content-type": "text/html"},
         )
         error = call_and_catch(response)
+        assert isinstance(error, CafayeProtocolError)
         assert error.body_snippet is not None
         assert "upstream connect error" in error.body_snippet
 
@@ -299,7 +304,9 @@ class TestNonProblemFailures:
 
     def test_a_500_whose_body_is_not_json_at_all_is_still_typed(self) -> None:
         error = call_and_catch(
-            httpx.Response(500, content=b"\x00\x01\x02not json", headers={"content-type": "application/json"})
+            httpx.Response(
+                500, content=b"\x00\x01\x02not json", headers={"content-type": "application/json"}
+            )
         )
         assert type(error) is CafayeProtocolError
 
@@ -328,7 +335,9 @@ class TestNonProblemFailures:
         assert error.problem_shaped is True
 
     def test_a_200_labelled_problem_json_is_not_a_success_even_if_the_body_is_empty(self) -> None:
-        error = call_and_catch(httpx.Response(200, headers={"content-type": "application/problem+json"}))
+        error = call_and_catch(
+            httpx.Response(200, headers={"content-type": "application/problem+json"})
+        )
         assert type(error) is CafayeProtocolError
         assert error.problem_shaped is False
 
@@ -389,7 +398,7 @@ class TestIsCafayeError:
         """A marker in ``vars()`` is a marker in somebody's structured log line."""
         error = call_and_catch(problem_response("internal", 500))
         assert "__cafaye_error__" not in vars(error)
-        serialised = json.dumps(error, default=lambda value: repr(value))
+        serialised = json.dumps(error, default=repr)
         assert "cafaye_error" not in serialised
 
 
@@ -406,8 +415,13 @@ class TestNetworkFailures:
 
     @staticmethod
     def _chained(outside: Exception, inside: BaseException) -> Exception:
+        # `raise` here is the mechanism, not an accident: httpx's own transport
+        # chains the platform error onto its own exception this way, and
+        # `classify_network_failure` reads the chain. Abstracting it into a
+        # function would build a fixture that cannot describe the thing it is a
+        # fixture for.
         try:
-            raise inside
+            raise inside  # noqa: TRY301
         except BaseException as exc:
             outside.__cause__ = exc
             return outside

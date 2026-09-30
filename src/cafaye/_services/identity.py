@@ -48,13 +48,12 @@ reader of a log line can go from one client to the other.
 
 from __future__ import annotations
 
-from collections.abc import Mapping, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
-from typing import Any, Final
+from typing import Any, Final, TypeVar, overload
 
-from .._client import _BaseCafaye
-from .._models import (
-    ApiKey,
+from cafaye._client import Model, _AsyncFace, _internal_bug, _SyncFace
+from cafaye._models import (
     ConfirmedEnrollment,
     Health,
     Introspection,
@@ -69,11 +68,20 @@ from .._models import (
     User,
 )
 
-__all__ = ["AsyncIdentityService", "IdentityService", "IdentityOperation", "IDENTITY_OPERATIONS"]
+__all__ = ["IDENTITY_OPERATIONS", "AsyncIdentityService", "IdentityOperation", "IdentityService"]
 
 #: The service name, stated once. The base URL, the error's operation prefix and
 #: the environment all derive from it.
 SERVICE: Final = "identity"
+
+#: The type of a decoded response, as the table declares it. One TypeVar for the
+#: whole module, so a method that says ``-> User`` and decodes with
+#: ``User.from_response`` has its return type inferred rather than asserted.
+T = TypeVar("T")
+
+
+#: The decoder an operation declares, or ``None`` for one that has no response.
+DeclaredModel = Callable[[Mapping[str, Any]], Any] | None
 
 
 @dataclass(frozen=True, slots=True)
@@ -95,12 +103,61 @@ class IdentityOperation:
     operation_id: str
     method: str
     path: str
-    model: Any = None
+    #: The decoder for the documented response, or ``None`` for an operation whose
+    #: response carries nothing. ``_declared`` holds every call site to this.
+    model: DeclaredModel = None
 
     @property
     def qualified(self) -> str:
         """``identity.get_current_user`` — what an exception's ``operation`` says."""
         return f"{SERVICE}.{self.name}"
+
+
+def _same_decoder(left: DeclaredModel, right: DeclaredModel) -> bool:
+    """Are these two declarations the same decoder?
+
+    Identity is the right test and it is **not sufficient**, which is the whole
+    reason this function exists. Every model's ``from_response`` is a
+    ``classmethod``, and Python builds a *fresh* bound method on every attribute
+    access — so ``User.from_response is User.from_response`` is ``False`` while
+    the two are the same method. An identity check here reported a mismatch on
+    every single call, which is a check that is always red and therefore checks
+    nothing.
+
+    So the two halves are compared instead: the class it is bound to and the
+    function behind it. That is exactly what ``==`` on a bound method does, and
+    it is spelled out here rather than leaned on so the reason survives the next
+    reader who is about to "simplify" it back to ``is``.
+    """
+    if left is right:
+        return True
+    return getattr(left, "__self__", None) is getattr(right, "__self__", None) and getattr(
+        left, "__func__", None
+    ) is getattr(right, "__func__", None)
+
+
+def _declared(name: str, model: DeclaredModel) -> None:
+    """Hold a call site's decoder to the one its operation declares.
+
+    The table above is the single source of truth for what each operation
+    returns, and the twenty methods below name the same decoder again — because a
+    method that says ``-> User`` but decodes with something else is exactly the
+    bug this check exists to make loud, and a ``cast`` would have hidden it.
+
+    So the duplication is deliberate and the cost is one comparison per call. The
+    alternative designs were both worse: a ``cast`` at every call site documents
+    the annotation without checking it, and dropping ``model`` from the table
+    makes the table no longer describe the service, which is the one thing it is
+    for.
+    """
+    operation = IDENTITY_OPERATIONS[name]
+    if not _same_decoder(operation.model, model):
+        raise _internal_bug(
+            f"{operation.qualified} is declared to return "
+            f"{getattr(operation.model, '__qualname__', None) or 'nothing'} but its method "
+            f"decodes with {getattr(model, '__qualname__', None) or 'nothing'}. The two "
+            "disagree, and the table is the one that decides. This is a bug in cafaye-py."
+        )
 
 
 class _Page(Mapping[str, Any]):
@@ -161,6 +218,31 @@ class _Page(Mapping[str, Any]):
         return f"_Page(rows={len(self.data)}, has_more={self.has_more!r})"
 
 
+def _session_or_challenge(body: Mapping[str, Any]) -> Session | MfaChallenge:
+    """``POST /v1/session``'s 200 or its 202, told apart by the document.
+
+    One operation, two response shapes, and the document says how to tell them
+    apart rather than leaving it to the client: "**AN ACCOUNT WITH A SECOND FACTOR
+    GETS 202 AND NO SESSION.** The password is correct and the authentication is
+    not finished, which is what 202 means. The ``202`` body carries **no ``token``
+    key at all** — not an empty one — so a client that reads ``token`` finds
+    nothing and is unambiguous about it."
+
+    That sentence is the discriminator, and using it is the whole reason the rule
+    is not a heuristic of ours. ``mfa_required`` would also work; ``token`` is
+    what the document actually promises to be absent, and an absent key is a
+    stronger statement than a boolean that could one day be omitted by accident.
+
+    Before this existed the operation had **no** model at all, which meant a
+    successful login returned ``None`` and a caller with a perfectly good session
+    token in hand had nothing to read it out of. No test covered it, which is the
+    failure mode ``tests/test_identity.py`` now exists to prevent.
+    """
+    if "token" not in body:
+        return MfaChallenge.from_response(body)
+    return Session.from_response(body)
+
+
 #: The twenty operations identity's document declares, in the document's order.
 #:
 #: The four ``api-keys`` routes and ``introspectAPIKey`` are identity-08's. They
@@ -174,7 +256,9 @@ IDENTITY_OPERATIONS: Final[Mapping[str, IdentityOperation]] = {
     operation.name: operation
     for operation in (
         IdentityOperation("register_user", "registerUser", "POST", "/v1/users", User.from_response),
-        IdentityOperation("create_session", "createSession", "POST", "/v1/session"),
+        IdentityOperation(
+            "create_session", "createSession", "POST", "/v1/session", _session_or_challenge
+        ),
         IdentityOperation("delete_session", "deleteSession", "DELETE", "/v1/session"),
         IdentityOperation(
             "complete_second_factor",
@@ -183,7 +267,9 @@ IDENTITY_OPERATIONS: Final[Mapping[str, IdentityOperation]] = {
             "/v1/session/mfa",
             Session.from_response,
         ),
-        IdentityOperation("get_mfa_status", "getMFAStatus", "GET", "/v1/mfa", MfaStatus.from_response),
+        IdentityOperation(
+            "get_mfa_status", "getMFAStatus", "GET", "/v1/mfa", MfaStatus.from_response
+        ),
         IdentityOperation("disable_mfa", "disableMFA", "DELETE", "/v1/mfa"),
         IdentityOperation(
             "start_mfa_enrollment",
@@ -206,7 +292,9 @@ IDENTITY_OPERATIONS: Final[Mapping[str, IdentityOperation]] = {
             "/v1/mfa/recovery-codes",
             RecoveryCodesResponse.from_response,
         ),
-        IdentityOperation("get_current_user", "getCurrentUser", "GET", "/v1/me", User.from_response),
+        IdentityOperation(
+            "get_current_user", "getCurrentUser", "GET", "/v1/me", User.from_response
+        ),
         IdentityOperation(
             "register_oidc_client",
             "registerOIDCClient",
@@ -272,16 +360,41 @@ class IdentityService:
 
     __slots__ = ("_client",)
 
-    def __init__(self, client: _BaseCafaye) -> None:
+    def __init__(self, client: _SyncFace) -> None:
         self._client = client
 
-    def _get(self, name: str, **params: Any) -> Any:
-        """Run one declared operation.
+    def _get(self, name: str, model: Model[T], **params: Any) -> T:
+        """Run one declared operation that answers with a body.
 
-        The one place a method body delegates, so all twenty methods are one line
-        and the declaration table above is the only place a path, a method or a
-        response type is written down.
+        The decoder is named here rather than looked up by string, so the
+        annotation on the calling method and the code that runs are checked
+        against each other; :func:`_declared` then checks the call site against
+        the table, which is the one place the truth lives.
         """
+        return self._run(name, model=model, params=params)
+
+    def _send(self, name: str, **params: Any) -> None:
+        """Run one declared operation that answers with nothing."""
+        self._run(name, model=None, params=params)
+
+    @overload
+    def _run(self, name: str, *, model: None, params: Mapping[str, Any]) -> None: ...
+
+    @overload
+    def _run(self, name: str, *, model: Model[T], params: Mapping[str, Any]) -> T: ...
+
+    def _run(self, name: str, *, model: DeclaredModel, params: Mapping[str, Any]) -> Any:
+        """The one body all four helpers share.
+
+        Overloaded rather than typed ``Any`` because the two cases really do have
+        different return types: an operation that declares a response always
+        produces one (a 2xx with an empty body is raised as a contract violation,
+        not returned as ``None``), and an operation that declares none produces
+        nothing. Collapsing that to ``Any`` would put the burden back on all
+        twenty methods, and collapsing it to ``T | None`` would put a ``None``
+        check on every call site for a case the annotations already exclude.
+        """
+        _declared(name, model)
         operation = IDENTITY_OPERATIONS[name]
         return self._client._perform(
             self._client._exchange(
@@ -290,18 +403,35 @@ class IdentityService:
                 path=operation.path,
                 operation=operation.qualified,
                 params=params or None,
-                model=operation.model,
+                model=model,
             )
         )
+
+    def _post(self, name: str, model: Model[T], body: Mapping[str, Any], **params: Any) -> T:
+        """POST a JSON body, keeping path parameters separate.
+
+        Path parameters and the JSON body travel in different places, and merging
+        them would put ``account_id`` in the request body where a service with
+        ``additionalProperties: false`` would reject it. So ``**params`` is the
+        path and the second argument is the body, with no overlap possible.
+        """
+        return self._run(name, model=model, params={**params, "json": dict(body)})
+
+    def _post_void(self, name: str, body: Mapping[str, Any], **params: Any) -> None:
+        self._run(name, model=None, params={**params, "json": dict(body)})
 
     # -- sessions ---------------------------------------------------------
 
     def register_user(self, *, email: str, password: str, **fields: Any) -> User:
         """``POST /v1/users``. The account's public projection: ``id`` and
         ``email``, lower-cased by the service before it is stored."""
-        return self._post_body("register_user", {"email": email, "password": password, **fields})
+        return self._post(
+            "register_user", User.from_response, {"email": email, "password": password, **fields}
+        )
 
-    def create_session(self, *, email: str, password: str, second_factor: str | None = None) -> Session | MfaChallenge:
+    def create_session(
+        self, *, email: str, password: str, second_factor: str | None = None
+    ) -> Session | MfaChallenge:
         """``POST /v1/session``.
 
         Returns a :class:`Session` normally, and a :class:`MfaChallenge` with a
@@ -313,7 +443,7 @@ class IdentityService:
         body: dict[str, Any] = {"email": email, "password": password}
         if second_factor is not None:
             body["second_factor"] = second_factor
-        return self._post_body("create_session", body)
+        return self._post("create_session", _session_or_challenge, body)
 
     def delete_session(self) -> None:
         """``DELETE /v1/session``. 204, and nothing to return.
@@ -323,27 +453,29 @@ class IdentityService:
         machine credential has no session to end and revoking the caller's would be
         wrong. A ``CafayeForbiddenError`` from here means "that was not a session".
         """
-        self._get("delete_session")
+        self._send("delete_session")
 
     def complete_second_factor(self, *, challenge: str, code: str) -> Session:
         """``POST /v1/session/mfa``. The 202's challenge, answered."""
-        return self._post_body("complete_second_factor", {"challenge": challenge, "code": code})
+        return self._post(
+            "complete_second_factor", Session.from_response, {"challenge": challenge, "code": code}
+        )
 
     # -- the current user -------------------------------------------------
 
     def get_current_user(self) -> User:
         """``GET /v1/me``. The caller's own account projection."""
-        return self._get("get_current_user")
+        return self._get("get_current_user", User.from_response)
 
     # -- multi-factor -----------------------------------------------------
 
     def get_mfa_status(self) -> MfaStatus:
         """``GET /v1/mfa``. A ``200`` with ``enabled: false``, not a 404."""
-        return self._get("get_mfa_status")
+        return self._get("get_mfa_status", MfaStatus.from_response)
 
     def disable_mfa(self, *, code: str) -> None:
         """``DELETE /v1/mfa``. Revokes every session, this caller's included."""
-        self._post_body("disable_mfa", {"code": code})
+        self._post_void("disable_mfa", {"code": code})
 
     def start_mfa_enrollment(self, *, method: str = "totp") -> StartedEnrollment:
         """``POST /v1/mfa/enrollments``.
@@ -351,23 +483,26 @@ class IdentityService:
         The response carries the only copy of the TOTP secret that will ever exist.
         Persist it immediately or start again.
         """
-        return self._post_body("start_mfa_enrollment", {"method": method})
+        return self._post(
+            "start_mfa_enrollment", StartedEnrollment.from_response, {"method": method}
+        )
 
-    def confirm_mfa_enrollment(
-        self, *, enrollment_id: str, code: str
-    ) -> ConfirmedEnrollment:
+    def confirm_mfa_enrollment(self, *, enrollment_id: str, code: str) -> ConfirmedEnrollment:
         """``POST /v1/mfa/enrollments/{enrollment_id}/confirm``.
 
         Every session the account holds was revoked to produce this response.
         """
-        return self._post_body(
-            "confirm_mfa_enrollment", {"code": code}, enrollment_id=enrollment_id
+        return self._post(
+            "confirm_mfa_enrollment",
+            ConfirmedEnrollment.from_response,
+            {"code": code},
+            enrollment_id=enrollment_id,
         )
 
     def regenerate_mfa_recovery_codes(self) -> RecoveryCodesResponse:
         """``POST /v1/mfa/recovery-codes``. The old set is destroyed in the same
         transaction that writes the new one."""
-        return self._post_body("regenerate_mfa_recovery_codes", {})
+        return self._post("regenerate_mfa_recovery_codes", RecoveryCodesResponse.from_response, {})
 
     # -- OIDC clients -----------------------------------------------------
 
@@ -385,8 +520,9 @@ class IdentityService:
         The only response carrying a ``client_secret``. Losing it means registering
         again, which is why this client's ``repr`` for the result is redacted.
         """
-        return self._post_body(
+        return self._post(
             "register_oidc_client",
+            OIDCClientWithSecret.from_response,
             {
                 "name": name,
                 "redirect_uris": list(redirect_uris),
@@ -403,15 +539,17 @@ class IdentityService:
 
         ``cursor`` is opaque; pass back ``page.next_cursor`` unexamined.
         """
-        return self._get("list_oidc_clients", **_pagination(account_id, limit, cursor))
+        return self._get("list_oidc_clients", _Page, **_pagination(account_id, limit, cursor))
 
     def get_oidc_client(self, *, account_id: str, client_id: str) -> OIDCClient:
         """``GET /v1/accounts/{account_id}/oidc-clients/{client_id}``."""
-        return self._get("get_oidc_client", account_id=account_id, client_id=client_id)
+        return self._get(
+            "get_oidc_client", OIDCClient.from_response, account_id=account_id, client_id=client_id
+        )
 
     def revoke_oidc_client(self, *, account_id: str, client_id: str) -> None:
         """``DELETE /v1/accounts/{account_id}/oidc-clients/{client_id}``."""
-        self._get("revoke_oidc_client", account_id=account_id, client_id=client_id)
+        self._send("revoke_oidc_client", account_id=account_id, client_id=client_id)
 
     # -- scoped API tokens ------------------------------------------------
 
@@ -431,14 +569,14 @@ class IdentityService:
         body: dict[str, Any] = {"name": name, "scopes": list(scopes)}
         if expires_in is not None:
             body["expires_in"] = expires_in
-        return self._post_body("mint_api_key", body, account_id=account_id)
+        return self._post("mint_api_key", IssuedApiKey.from_response, body, account_id=account_id)
 
     def list_api_keys(
         self, *, account_id: str, limit: int | None = None, cursor: str | None = None
     ) -> _Page:
         """``GET /v1/accounts/{account_id}/api-keys``. Metadata only — a listing
         can never carry a token, and :class:`ApiKey` has no field for one."""
-        return self._get("list_api_keys", **_pagination(account_id, limit, cursor))
+        return self._get("list_api_keys", _Page, **_pagination(account_id, limit, cursor))
 
     def revoke_api_key(self, *, account_id: str, key_id: str, reason: str | None = None) -> None:
         """``DELETE /v1/accounts/{account_id}/api-keys/{key_id}``.
@@ -459,7 +597,7 @@ class IdentityService:
                 )
             )
             return
-        self._get("revoke_api_key", account_id=account_id, key_id=key_id)
+        self._send("revoke_api_key", account_id=account_id, key_id=key_id)
 
     def introspect_api_key(self, *, token: str) -> Introspection:
         """``POST /v1/introspections``.
@@ -469,40 +607,17 @@ class IdentityService:
         request by the credential rules and never appears in a header the
         credential-leak test walks.
         """
-        return self._post_body("introspect_api_key", {"token": token})
+        return self._post("introspect_api_key", Introspection.from_response, {"token": token})
 
     # -- operations -------------------------------------------------------
 
     def liveness(self) -> Health:
         """``GET /healthz``. Is the process up."""
-        return self._get("liveness")
+        return self._get("liveness", Health.from_response)
 
     def readiness(self) -> Health:
         """``GET /readyz``. Can the process serve. ``deps`` is present here only."""
-        return self._get("readiness")
-
-    # -- helpers ----------------------------------------------------------
-
-    def _post_body(self, name: str, body: Mapping[str, Any], **params: Any) -> Any:
-        """POST a JSON body to one declared operation, keeping path params separate.
-
-        Path parameters and the JSON body travel in different places, and merging
-        them would put ``account_id`` in the request body where a service with
-        ``additionalProperties: false`` would reject it. So ``**params`` is the path
-        and the first argument is the body, with no overlap possible.
-        """
-        operation = IDENTITY_OPERATIONS[name]
-        return self._client._perform(
-            self._client._exchange(
-                SERVICE,
-                method=operation.method,
-                path=operation.path,
-                operation=operation.qualified,
-                params=params or None,
-                json=dict(body),
-                model=operation.model,
-            )
-        )
+        return self._get("readiness", Health.from_response)
 
 
 class AsyncIdentityService:
@@ -510,10 +625,24 @@ class AsyncIdentityService:
 
     __slots__ = ("_client",)
 
-    def __init__(self, client: _BaseCafaye) -> None:
+    def __init__(self, client: _AsyncFace) -> None:
         self._client = client
 
-    async def _get(self, name: str, **params: Any) -> Any:
+    async def _get(self, name: str, model: Model[T], **params: Any) -> T:
+        return await self._run(name, model=model, params=params)
+
+    async def _send(self, name: str, **params: Any) -> None:
+        await self._run(name, model=None, params=params)
+
+    @overload
+    async def _run(self, name: str, *, model: None, params: Mapping[str, Any]) -> None: ...
+
+    @overload
+    async def _run(self, name: str, *, model: Model[T], params: Mapping[str, Any]) -> T: ...
+
+    async def _run(self, name: str, *, model: DeclaredModel, params: Mapping[str, Any]) -> Any:
+        """The one body all four helpers share. See the sync face's ``_run``."""
+        _declared(name, model)
         operation = IDENTITY_OPERATIONS[name]
         return await self._client._aperform(
             self._client._exchange(
@@ -522,30 +651,22 @@ class AsyncIdentityService:
                 path=operation.path,
                 operation=operation.qualified,
                 params=params or None,
-                model=operation.model,
+                model=model,
             )
         )
 
-    async def _post_body(self, name: str, body: Mapping[str, Any], **params: Any) -> Any:
-        operation = IDENTITY_OPERATIONS[name]
-        return await self._client._aperform(
-            self._client._exchange(
-                SERVICE,
-                method=operation.method,
-                path=operation.path,
-                operation=operation.qualified,
-                params=params or None,
-                json=dict(body),
-                model=operation.model,
-            )
-        )
+    async def _post(self, name: str, model: Model[T], body: Mapping[str, Any], **params: Any) -> T:
+        return await self._run(name, model=model, params={**params, "json": dict(body)})
+
+    async def _post_void(self, name: str, body: Mapping[str, Any], **params: Any) -> None:
+        await self._run(name, model=None, params={**params, "json": dict(body)})
 
     # -- sessions ---------------------------------------------------------
 
     async def register_user(self, *, email: str, password: str, **fields: Any) -> User:
         """``POST /v1/users``. See :meth:`IdentityService.register_user`."""
-        return await self._post_body(
-            "register_user", {"email": email, "password": password, **fields}
+        return await self._post(
+            "register_user", User.from_response, {"email": email, "password": password, **fields}
         )
 
     async def create_session(
@@ -555,47 +676,54 @@ class AsyncIdentityService:
         body: dict[str, Any] = {"email": email, "password": password}
         if second_factor is not None:
             body["second_factor"] = second_factor
-        return await self._post_body("create_session", body)
+        return await self._post("create_session", _session_or_challenge, body)
 
     async def delete_session(self) -> None:
         """``DELETE /v1/session``. See :meth:`IdentityService.delete_session`."""
-        await self._get("delete_session")
+        await self._send("delete_session")
 
     async def complete_second_factor(self, *, challenge: str, code: str) -> Session:
         """``POST /v1/session/mfa``."""
-        return await self._post_body("complete_second_factor", {"challenge": challenge, "code": code})
+        return await self._post(
+            "complete_second_factor", Session.from_response, {"challenge": challenge, "code": code}
+        )
 
     # -- the current user -------------------------------------------------
 
     async def get_current_user(self) -> User:
         """``GET /v1/me``."""
-        return await self._get("get_current_user")
+        return await self._get("get_current_user", User.from_response)
 
     # -- multi-factor -----------------------------------------------------
 
     async def get_mfa_status(self) -> MfaStatus:
         """``GET /v1/mfa``."""
-        return await self._get("get_mfa_status")
+        return await self._get("get_mfa_status", MfaStatus.from_response)
 
     async def disable_mfa(self, *, code: str) -> None:
         """``DELETE /v1/mfa``."""
-        await self._post_body("disable_mfa", {"code": code})
+        await self._post_void("disable_mfa", {"code": code})
 
     async def start_mfa_enrollment(self, *, method: str = "totp") -> StartedEnrollment:
         """``POST /v1/mfa/enrollments``."""
-        return await self._post_body("start_mfa_enrollment", {"method": method})
+        return await self._post(
+            "start_mfa_enrollment", StartedEnrollment.from_response, {"method": method}
+        )
 
-    async def confirm_mfa_enrollment(
-        self, *, enrollment_id: str, code: str
-    ) -> ConfirmedEnrollment:
+    async def confirm_mfa_enrollment(self, *, enrollment_id: str, code: str) -> ConfirmedEnrollment:
         """``POST /v1/mfa/enrollments/{enrollment_id}/confirm``."""
-        return await self._post_body(
-            "confirm_mfa_enrollment", {"code": code}, enrollment_id=enrollment_id
+        return await self._post(
+            "confirm_mfa_enrollment",
+            ConfirmedEnrollment.from_response,
+            {"code": code},
+            enrollment_id=enrollment_id,
         )
 
     async def regenerate_mfa_recovery_codes(self) -> RecoveryCodesResponse:
         """``POST /v1/mfa/recovery-codes``."""
-        return await self._post_body("regenerate_mfa_recovery_codes", {})
+        return await self._post(
+            "regenerate_mfa_recovery_codes", RecoveryCodesResponse.from_response, {}
+        )
 
     # -- OIDC clients -----------------------------------------------------
 
@@ -609,8 +737,9 @@ class AsyncIdentityService:
         scopes: Sequence[str],
     ) -> OIDCClientWithSecret:
         """``POST /v1/accounts/{account_id}/oidc-clients``."""
-        return await self._post_body(
+        return await self._post(
             "register_oidc_client",
+            OIDCClientWithSecret.from_response,
             {
                 "name": name,
                 "redirect_uris": list(redirect_uris),
@@ -624,15 +753,17 @@ class AsyncIdentityService:
         self, *, account_id: str, limit: int | None = None, cursor: str | None = None
     ) -> _Page:
         """``GET /v1/accounts/{account_id}/oidc-clients``."""
-        return await self._get("list_oidc_clients", **_pagination(account_id, limit, cursor))
+        return await self._get("list_oidc_clients", _Page, **_pagination(account_id, limit, cursor))
 
     async def get_oidc_client(self, *, account_id: str, client_id: str) -> OIDCClient:
         """``GET /v1/accounts/{account_id}/oidc-clients/{client_id}``."""
-        return await self._get("get_oidc_client", account_id=account_id, client_id=client_id)
+        return await self._get(
+            "get_oidc_client", OIDCClient.from_response, account_id=account_id, client_id=client_id
+        )
 
     async def revoke_oidc_client(self, *, account_id: str, client_id: str) -> None:
         """``DELETE /v1/accounts/{account_id}/oidc-clients/{client_id}``."""
-        await self._get("revoke_oidc_client", account_id=account_id, client_id=client_id)
+        await self._send("revoke_oidc_client", account_id=account_id, client_id=client_id)
 
     # -- scoped API tokens ------------------------------------------------
 
@@ -643,13 +774,15 @@ class AsyncIdentityService:
         body: dict[str, Any] = {"name": name, "scopes": list(scopes)}
         if expires_in is not None:
             body["expires_in"] = expires_in
-        return await self._post_body("mint_api_key", body, account_id=account_id)
+        return await self._post(
+            "mint_api_key", IssuedApiKey.from_response, body, account_id=account_id
+        )
 
     async def list_api_keys(
         self, *, account_id: str, limit: int | None = None, cursor: str | None = None
     ) -> _Page:
         """``GET /v1/accounts/{account_id}/api-keys``."""
-        return await self._get("list_api_keys", **_pagination(account_id, limit, cursor))
+        return await self._get("list_api_keys", _Page, **_pagination(account_id, limit, cursor))
 
     async def revoke_api_key(
         self, *, account_id: str, key_id: str, reason: str | None = None
@@ -671,21 +804,21 @@ class AsyncIdentityService:
                 )
             )
             return
-        await self._get("revoke_api_key", account_id=account_id, key_id=key_id)
+        await self._send("revoke_api_key", account_id=account_id, key_id=key_id)
 
     async def introspect_api_key(self, *, token: str) -> Introspection:
         """``POST /v1/introspections``."""
-        return await self._post_body("introspect_api_key", {"token": token})
+        return await self._post("introspect_api_key", Introspection.from_response, {"token": token})
 
     # -- operations -------------------------------------------------------
 
     async def liveness(self) -> Health:
         """``GET /healthz``."""
-        return await self._get("liveness")
+        return await self._get("liveness", Health.from_response)
 
     async def readiness(self) -> Health:
         """``GET /readyz``."""
-        return await self._get("readiness")
+        return await self._get("readiness", Health.from_response)
 
 
 def _pagination(account_id: str, limit: int | None, cursor: str | None) -> dict[str, Any]:

@@ -79,7 +79,7 @@ import math
 from collections.abc import Callable, Generator, Mapping
 from dataclasses import dataclass
 from types import TracebackType
-from typing import Any, Self, TypeVar, cast
+from typing import Any, Protocol, Self, TypeVar, cast
 
 import httpx
 
@@ -88,6 +88,7 @@ from ._credentials import CredentialKind, attach_credential, classify_credential
 from ._errors import (
     CafayeConfigurationError,
     CafayeError,
+    ErrorKind,
     NetworkFailureReason,
     cancellation_in_chain,
     classify_network_failure,
@@ -98,7 +99,7 @@ from ._errors import (
 )
 from ._redact import redact_text, safe_cause
 
-__all__ = ["AsyncCafaye", "Cafaye", "DEFAULT_TIMEOUT"]
+__all__ = ["DEFAULT_TIMEOUT", "AsyncCafaye", "Cafaye"]
 
 #: The default request timeout, in seconds.
 #:
@@ -113,10 +114,76 @@ DEFAULT_TIMEOUT = 30.0
 
 T = TypeVar("T")
 
+#: A decoder: a decoded JSON object in, the documented model out.
+#:
+#: Generic in its result, and that is the point. The response type of an
+#: operation is named at its call site rather than looked up by string, so the
+#: annotation on a public method and the decoder that runs are checked against
+#: each other by the type checker instead of by a comment. The declaration table
+#: in ``_services/identity.py`` stays the single source of truth, and
+#: ``_declared`` is what holds the two to each other.
+Model = Callable[[Mapping[str, Any]], T]
+
 #: One operation's whole lifecycle, minus the I/O. Yields the request to send,
 #: receives the response, returns the decoded value or raises. The two faces of
 #: the client differ only in what they do between those two points.
 Exchange = Generator["PendingRequest", httpx.Response, T]
+
+
+class _SyncFace(Protocol):
+    """What a **synchronous** service namespace needs from the client it holds.
+
+    Structural rather than a base class, and it exists to make the wiring a
+    checked fact. ``IdentityService`` and ``AsyncIdentityService`` take one of
+    these, so ``Cafaye(…).identity`` being synchronous and
+    ``AsyncCafaye(…).identity`` being a coroutine is something the type checker
+    verifies at each construction site rather than something a reader has to take
+    on trust from a comment.
+
+    It is deliberately *not* ``_BaseCafaye``: that class is shared, and naming it
+    here would say nothing, because the only two methods that distinguish the
+    faces are exactly the two this protocol asks for.
+    """
+
+    def _exchange(
+        self,
+        service: str,
+        *,
+        method: str,
+        path: str,
+        operation: str,
+        params: Mapping[str, Any] | None = None,
+        json: object | None = None,
+        model: Model[Any] | None = None,
+    ) -> Exchange[Any]:
+        """Build one operation's exchange. No I/O happens here."""
+        ...
+
+    def _perform(self, exchange: Exchange[Any]) -> Any:
+        """Drive the exchange to completion and return its value."""
+        ...
+
+
+class _AsyncFace(Protocol):
+    """:class:`_SyncFace`'s other half. The only differences are the two methods."""
+
+    def _exchange(
+        self,
+        service: str,
+        *,
+        method: str,
+        path: str,
+        operation: str,
+        params: Mapping[str, Any] | None = None,
+        json: object | None = None,
+        model: Model[Any] | None = None,
+    ) -> Exchange[Any]:
+        """Build one operation's exchange. No I/O happens here."""
+        ...
+
+    async def _aperform(self, exchange: Exchange[Any]) -> Any:
+        """Drive the exchange to completion and return its value."""
+        ...
 
 
 @dataclass(frozen=True, slots=True)
@@ -137,7 +204,13 @@ class PendingRequest:
     #: Path parameters and query parameters, merged. httpx substitutes ``{name}``
     #: placeholders in the path from the same mapping it builds the query from,
     #: which is why one dict carries both.
-    params: Mapping[str, object] | None = None
+    #:
+    #: ``Any`` rather than ``object`` because this mapping goes straight into
+    #: httpx's ``build_request(params=...)``, whose parameter type is a closed
+    #: union of the things a query value may be. ``object`` is not assignable to
+    #: it; ``Any`` is, and narrowing it to something narrower here would mean
+    #: re-deriving httpx's union in a second place to keep it in step.
+    params: Mapping[str, Any] | None = None
     json_body: object | None = None
 
 
@@ -150,7 +223,9 @@ def _decode(response: httpx.Response) -> object:
     """
     try:
         response.read()
-    except httpx.ResponseNotRead:  # pragma: no cover - defensive; httpx raises this only for a streaming response mid-flight
+    except (
+        httpx.ResponseNotRead
+    ):  # pragma: no cover - defensive; httpx raises this only for a streaming response mid-flight
         return None
     try:
         return response.json()
@@ -182,7 +257,14 @@ class _BaseCafaye:
     :class:`AsyncCafaye`; a third class that is neither is a thing with no meaning.
     """
 
-    __slots__ = ("_base_url_sources", "_base_urls", "_default_headers", "_token", "_token_kind")
+    __slots__ = (
+        "_base_url_sources",
+        "_base_urls",
+        "_default_headers",
+        "_timeout",
+        "_token",
+        "_token_kind",
+    )
 
     def __init__(
         self,
@@ -193,8 +275,7 @@ class _BaseCafaye:
         headers: Mapping[str, str] | None,
     ) -> None:
         resolved = {
-            service: resolve_base_url(service, explicit=base_url)
-            for service in SERVICE_NAMES
+            service: resolve_base_url(service, explicit=base_url) for service in SERVICE_NAMES
         }
         #: Where each of the six services is pointed, after resolution.
         self._base_urls: dict[str, str] = {
@@ -205,6 +286,12 @@ class _BaseCafaye:
             service: value.source for service, value in resolved.items()
         }
         self._default_headers = dict(headers or {})
+        # Validated here rather than in each face, so there is one place that
+        # decides what a valid deadline is. It was previously accepted here and
+        # ignored, with each face validating its own copy -- a parameter that is
+        # taken and never used is a function that lies about what it needs, and
+        # `ruff`'s ARG002 was right to say so.
+        self._timeout = self._validate_timeout(timeout)
         self._token: str | None = None
         self._token_kind: CredentialKind | None = None
         # Classified before anything is stored, so a credential that would break
@@ -272,9 +359,9 @@ class _BaseCafaye:
         method: str,
         path: str,
         operation: str,
-        params: Mapping[str, object] | None = None,
+        params: Mapping[str, Any] | None = None,
         json: object | None = None,
-        model: Callable[[Mapping[str, Any]], T] | None = None,
+        model: Model[T] | None = None,
     ) -> Exchange[T]:
         """Build one operation's exchange. No I/O happens here.
 
@@ -298,7 +385,11 @@ class _BaseCafaye:
         )
 
     def _run(
-        self, pending: PendingRequest, *, operation: str, model: Callable[[Mapping[str, Any]], T] | None
+        self,
+        pending: PendingRequest,
+        *,
+        operation: str,
+        model: Model[T] | None,
     ) -> Exchange[T]:
         """The generator half: yield the request, then map the response.
 
@@ -309,25 +400,38 @@ class _BaseCafaye:
         return self._finish(response, operation=operation, model=model)
 
     def _finish(
-        self, response: httpx.Response, *, operation: str, model: Callable[[Mapping[str, Any]], T] | None
-    ) -> T | None:
+        self,
+        response: httpx.Response,
+        *,
+        operation: str,
+        model: Model[T] | None,
+    ) -> T:
         """Turn a response into a value, or raise. The five outcomes, in order:
 
-        ==========  ==================================  ==========================
-        outcome     when                                  raised
-        ==========  ==================================  ==========================
-        success     2xx, not problem-shaped               —
-        no content  204, or an empty body, no model       —
-        problem     2xx carrying a problem document        ``CafayeProtocolError``
-        problem     non-2xx carrying a problem document   ``CafayeProblemError``
-        protocol    non-2xx without one                   ``CafayeProtocolError``
-        ==========  ==================================  ==========================
+        ==========  =========================================  ==========================
+        outcome     when                                        raised
+        ==========  =========================================  ==========================
+        success     2xx, not problem-shaped, body present       —
+        no content  2xx, and the operation declares no response   —
+        protocol    2xx, problem-shaped                          ``CafayeProtocolError``
+        protocol    2xx, empty body where one was declared       ``CafayeProtocolError``
+        problem     non-2xx carrying a problem document          ``CafayeProblemError``
+        protocol    non-2xx without one                          ``CafayeProtocolError``
+        ==========  =========================================  ==========================
 
-        The third row is the brief's "a problem-shaped body with a 200 is not a
-        success", and it is the one most clients get wrong. Handing a caller a
-        ``Problem`` where its annotation promised a ``User`` produces an
+        The fourth row is the one most clients get wrong, and the brief asks for it
+        by name: "a problem-shaped body with a 200 is not a success". Handing a
+        caller a ``Problem`` where its annotation promised a ``User`` produces an
         ``AttributeError`` three frames from the mistake; raising here produces a
         diagnosis *at* the mistake.
+
+        The fifth row is this package's own addition, and it is a typing decision
+        as much as a behavioural one. ``GET /v1/me`` answers 200 and ``User``; a
+        200 with **no body at all** is not a ``User``, and returning ``None``
+        for it would mean every call site carries a ``None`` check that the
+        annotation says is impossible. So the annotation and the behaviour agree,
+        and a service that answers an empty 200 is reported as the contract
+        violation it is.
         """
         secrets = [self._token] if self._token is not None else []
         content_type = response.headers.get("content-type")
@@ -344,8 +448,23 @@ class _BaseCafaye:
                     operation=operation,
                     secrets=secrets,
                 )
-            if model is None or not response.content:
-                return None
+            if model is None:
+                # The only caller that passes no model is the service layer's
+                # `_send`/`_post_void`, both declared `-> None`, which discard
+                # this. Typing the return as `T | None` instead would put a `None`
+                # check on all twenty operations to satisfy an annotation that is
+                # already correct: a 204 for `DELETE /v1/session` returns nothing
+                # because nothing was promised, not because nothing arrived.
+                return cast("T", None)
+            if not response.content:
+                raise protocol_error_from(
+                    status=response.status_code,
+                    body_text="",
+                    problem_shaped=False,
+                    content_type=content_type,
+                    operation=operation,
+                    secrets=secrets,
+                )
             return model(_as_mapping(body))
 
         if problem_shaped:
@@ -458,10 +577,7 @@ class _BaseCafaye:
         the place the token went.
         """
         kind = self._token_kind.value if self._token_kind is not None else "no credential"
-        return (
-            f"{type(self).__name__}(base_urls={self._base_urls!r}, "
-            f"credential=<{kind}>)"
-        )
+        return f"{type(self).__name__}(base_urls={self._base_urls!r}, credential=<{kind}>)"
 
 
 def _is_problem_media_type(content_type: str | None) -> bool:
@@ -481,6 +597,31 @@ def _as_mapping(body: object) -> Mapping[str, Any]:
     return from_mapping(body)
 
 
+def _internal_bug(message: str) -> CafayeError:
+    """The error for a state this package should not be able to reach.
+
+    There are exactly three of these, and all three are internal invariants: a
+    lifecycle that asked for two requests, one that asked for none, and a service
+    method that decodes with a different model than the one its operation
+    declares. None of them is anything the caller did.
+
+    ``kind`` is ``CONFIGURATION``, and the choice is a precedent rather than a
+    classification. The four kinds in :class:`~cafaye.ErrorKind` all describe *the
+    caller's request failing*; an internal invariant is not that, and inventing a
+    fifth kind would put this client's error vocabulary one member ahead of the
+    one every other cafaye SDK has. ``cafaye-ts`` reports its own internal lookup
+    miss — ``rawClient`` for a service it has no client for — the same way, and
+    the two clients being one product is worth more than a fifth enum member.
+
+    The message says what a caller should do about it, which is nothing except
+    report it, and that is the honest advice.
+    """
+    return CafayeError(
+        f"{message} This is a bug in cafaye-py, not a failure of the call.",
+        kind=ErrorKind.CONFIGURATION,
+    )
+
+
 def _drain(exchange: Exchange[T], response: httpx.Response) -> T:
     """Resume a synchronous exchange and take its value.
 
@@ -495,24 +636,27 @@ def _drain(exchange: Exchange[T], response: httpx.Response) -> T:
         exchange.send(response)
     except StopIteration as finished:
         return finished.value  # type: ignore[no-any-return]
-    raise CafayeError(
-        "A cafaye request lifecycle produced more than one request. This is a bug in "
-        "cafaye-py, not a failure of the call.",
-    )  # pragma: no cover - unreachable for every exchange in this package
+    raise _internal_bug(  # pragma: no cover - unreachable for every exchange here
+        "A cafaye request lifecycle produced more than one request."
+    )
 
 
 def _start(exchange: Exchange[T]) -> PendingRequest:
     """Run an exchange up to its first ``yield``."""
     try:
-        return exchange.send(None)
+        # `None` primes the generator, which yields the request before it can
+        # receive a response. The `Exchange` alias declares the send type as a
+        # `Response` because that is what is sent *after* priming, and this cast is
+        # the one place that convention is expressed; the body of every exchange in
+        # this package only ever resumes from a real response.
+        return exchange.send(cast("httpx.Response", None))
     except StopIteration as exc:
         # A lifecycle that never asked for a request has nothing to send. Every
         # exchange this package builds yields once, so this arm is a statement
         # about the contract rather than a reachable path — and saying so beats
         # returning something the caller would then use as a request.
-        raise CafayeError(
-            "A cafaye request lifecycle ended without asking for a request. This is a bug in "
-            "cafaye-py, not a failure of the call."
+        raise _internal_bug(
+            "A cafaye request lifecycle ended without asking for a request."
         ) from exc  # pragma: no cover
 
 
@@ -572,7 +716,7 @@ class Cafaye(_BaseCafaye):
             headers=headers,
         )
         self._client = httpx.Client(
-            timeout=self._validate_timeout(timeout),
+            timeout=self._timeout,
             transport=transport,
             follow_redirects=False,
         )
@@ -669,7 +813,7 @@ class AsyncCafaye(_BaseCafaye):
             headers=headers,
         )
         self._client = httpx.AsyncClient(
-            timeout=self._validate_timeout(timeout),
+            timeout=self._timeout,
             transport=transport,
             follow_redirects=False,
         )
@@ -714,4 +858,3 @@ class AsyncCafaye(_BaseCafaye):
         traceback: TracebackType | None,
     ) -> None:
         await self.aclose()
-

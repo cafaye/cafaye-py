@@ -114,11 +114,10 @@ def redact_text(secrets: Sequence[str] = (), max_length: int = 0) -> Redactor:
     # part-way and leave a tail behind. With the all-or-nothing rule that
     # particular bug is harmless — either string still matches — but ordering by
     # length costs nothing and keeps the intent obvious to the next reader.
-    exact = sorted(
-        {secret for secret in secrets if isinstance(secret, str) and secret},
-        key=len,
-        reverse=True,
-    )
+    # `secrets` is `Sequence[str]`, so the only question left about each entry is
+    # whether it is worth carrying, and an empty one is not: it would match
+    # everywhere and redact everything.
+    exact = sorted({secret for secret in secrets if secret}, key=len, reverse=True)
 
     def redact(value: object) -> str:
         if isinstance(value, str):

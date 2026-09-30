@@ -51,7 +51,9 @@ class TestExplicitWins:
         # argument, and the other two answers are not anywhere in it.
         assert resolved.source == "the `base_url` argument"
 
-    def test_the_environment_answer_is_absent_from_the_result(self, monkeypatch: pytest.MonkeyPatch) -> None:
+    def test_the_environment_answer_is_absent_from_the_result(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
         monkeypatch.setenv(BASE_URL_ENV, FROM_ENV)
         client = Cafaye(base_url=EXPLICIT)
         for service in SERVICE_NAMES:
@@ -76,7 +78,9 @@ class TestEnvironmentWinsOverTheDefault:
         assert client.base_url_sources["identity"] == f"${BASE_URL_ENV}"
         assert DEFAULT_BASE_URLS["identity"] not in client.base_urls.values()
 
-    def test_every_service_gets_the_one_environment_value(self, monkeypatch: pytest.MonkeyPatch) -> None:
+    def test_every_service_gets_the_one_environment_value(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
         """One origin for all six, which is what a single-variable name means."""
         monkeypatch.setenv(BASE_URL_ENV, FROM_ENV)
         client = Cafaye()
@@ -202,7 +206,7 @@ class TestNormalisation:
 class TestServiceNames:
     def test_an_unknown_service_is_refused(self) -> None:
         with pytest.raises(CafayeConfigurationError, match="service"):
-            resolve_base_url("paymentz", env={})  # type: ignore[arg-type]
+            resolve_base_url("paymentz", env={})
 
     def test_the_six_names_are_the_documented_ones(self) -> None:
         assert SERVICE_NAMES == ("identity", "billing", "courier", "darkroom", "muse", "pantry")
@@ -218,7 +222,9 @@ class TestErrorsNeverNameALoopback:
     actively harmful advice.
     """
 
-    def test_no_configuration_error_suggests_a_loopback(self, monkeypatch: pytest.MonkeyPatch) -> None:
+    def test_no_configuration_error_suggests_a_loopback(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
         monkeypatch.delenv(BASE_URL_ENV, raising=False)
         for bad in ("identity.example.test", "file:///x", "ftp://x", "://x"):
             try:
