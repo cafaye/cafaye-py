@@ -77,8 +77,28 @@ REDACTED = "[redacted: a credential-shaped value was present]"
 #: rather than to the first space, because a cookie value contains neither and a
 #: ``Set-Cookie`` line carries four attributes after the one that matters.
 CREDENTIAL_SHAPES = re.compile(
-    r"\bcafaye_[A-Za-z0-9_-]+"
-    r"|\beyJ[A-Za-z0-9_-]{4,}\.[A-Za-z0-9_-]{4,}\.[A-Za-z0-9_-]*"
+    # NO `\b` in front of the two structural token patterns, and its absence is
+    # load-bearing in the other direction.
+    #
+    # This alternation used to begin `\bcafaye_` and `\beyJ`, on the reasonable-
+    # sounding theory that a word boundary stops the pattern matching inside a
+    # longer word. It does the opposite of what is wanted. `\b` asserts a
+    # transition between a word and a non-word character, so `\bcafaye_` matches a
+    # bare token and a token after a `/`, a `?` or a space — and silently fails on
+    # a token preceded by **any** word character:
+    #
+    #     xcafaye_abc...   not matched
+    #     1cafaye_abc...   not matched
+    #     token=cafaye_... matched
+    #
+    # And a credential concatenated onto something is not a rarer case, it is the
+    # ordinary one: a proxy URL with the credential in the path, a log line that
+    # interpolated it into an identifier, a cursor that embedded it. The prefix
+    # `cafaye_` is seven characters chosen by identity precisely so a leaked
+    # credential is recognisable by sight; anchoring it behind a word boundary
+    # threw that away for the shapes that matter most.
+    r"cafaye_[A-Za-z0-9_-]+"
+    r"|eyJ[A-Za-z0-9_-]{4,}\.[A-Za-z0-9_-]{4,}\.[A-Za-z0-9_-]*"
     r"|(?:^|[\s,;])(?:proxy-)?authorization\s*:\s*\S+"
     r"|(?:^|[\s,;])(?:set-)?cookie\s*:\s*[^\r\n]*",
     re.IGNORECASE,

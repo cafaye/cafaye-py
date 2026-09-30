@@ -58,10 +58,23 @@ import pytest
 
 from cafaye import (
     API_TOKEN_PREFIX,
+    ApiKey,
     Cafaye,
     CafayeConfigurationError,
     CafayeNetworkError,
     CafayeProtocolError,
+    ConfirmedEnrollment,
+    Health,
+    Introspection,
+    IssuedApiKey,
+    MfaChallenge,
+    MfaStatus,
+    OIDCClient,
+    OIDCClientWithSecret,
+    RecoveryCodesResponse,
+    Session,
+    StartedEnrollment,
+    User,
 )
 
 # THE FAKE CREDENTIALS.
@@ -149,6 +162,18 @@ def every_string_in(
                 every_string_in(chained, seen, out)
         for attribute_value in list(vars(value).values()):
             every_string_in(attribute_value, seen, out)
+        return out
+
+    # A dataclass, by any of the three shapes it can arrive in. This arm is the
+    # one whose absence let a `Session` repr leak: the walk appended `str(value)`
+    # -- which for a redacted repr is clean -- and stopped, never reaching the
+    # `token` field underneath. A structured logger *does* descend here, so the
+    # walk has to as well or it is asserting less than the thing it stands for.
+    import dataclasses
+
+    if dataclasses.is_dataclass(value) and not isinstance(value, type):
+        for field in dataclasses.fields(value):
+            every_string_in(getattr(value, field.name, None), seen, out)
         return out
 
     if isinstance(value, (dict,)):
@@ -579,7 +604,233 @@ class TestEveryErrorClassIsClean:
             assert_no_credential("network walk", text)
 
 
+#: Which fake credential goes in which field, chosen so that each one exercises a
+#: different rule: the API token is the ``cafaye_`` prefix shape, the session token
+#: is a bare base64url string with no recognisable prefix at all, the TOTP secret
+#: is base32, and the recovery codes are a **tuple**, so the walk has to recurse
+#: into a container rather than compare a field to a string.
+_CREDENTIAL_FOR: dict[str, Any] = {
+    "token": FAKE_API_TOKEN,
+    "client_secret": FAKE_SESSION_TOKEN,
+    # A bare base32 string with no recognisable prefix at all, which is both the
+    # real shape of a TOTP secret and the harder case for anything matching on
+    # structure. It is the session fake because that one is already an opaque
+    # string with no prefix.
+    "secret": FAKE_SESSION_TOKEN,
+    "challenge": FAKE_SESSION_TOKEN,
+    "recovery_codes": (FAKE_SESSION_TOKEN, FAKE_SESSION_TOKEN + "-2"),
+}
+
+#: Every model, so the "nothing else needs redacting" claim is checked too.
+_EVERY_MODEL: tuple[type[Any], ...] = (
+    ApiKey,
+    ConfirmedEnrollment,
+    Health,
+    Introspection,
+    IssuedApiKey,
+    MfaChallenge,
+    MfaStatus,
+    OIDCClient,
+    OIDCClientWithSecret,
+    RecoveryCodesResponse,
+    Session,
+    StartedEnrollment,
+    User,
+)
+
+#: The seven models that hold a credential, and **which field** holds it.
+#:
+#: Stated as a table rather than derived, and the reason is the mistake this test
+#: was first written wrong in. Planting the fake credential in *every* declared
+#: field and asserting the ``repr`` is clean looks thorough and is not: the
+#: obvious version of it puts the credential in ``Introspection.sub``, which is a
+#: **user id**. A service that put a credential there would be broken, but a
+#: client that refused to print it would be hiding a field it is supposed to show.
+#:
+#: So the credential goes in the fields that hold one **by meaning**, and the
+#: ``repr`` is asserted to hide exactly those and to keep the rest. That is a
+#: judgement, and it is data so a reader can disagree with a specific row rather
+#: than with a general principle.
+_CREDENTIAL_FIELDS: dict[type[Any], tuple[tuple[str, ...], tuple[str, ...]]] = {
+    # The session token, and the expiry a developer debugging a 401 needs.
+    Session: (("token",), ("expires_at",)),
+    # "A one-time credential for POST /v1/session/mfa, valid for ten minutes and
+    # single-use" -- identity's own words, and exactly the lifetime profile that
+    # makes a challenge worth stealing.
+    MfaChallenge: (("challenge",), ("expires_at", "mfa_required")),
+    # The base32 TOTP secret, which no endpoint can re-read.
+    StartedEnrollment: (
+        ("secret",),
+        ("enrollment_id", "method", "digits", "period_seconds", "algorithm"),
+    ),
+    # The account's way back in, printed once.
+    ConfirmedEnrollment: (("recovery_codes",), ("enabled", "method", "enrolled_at")),
+    # A second copy of the same codes, from the regenerate route.
+    RecoveryCodesResponse: (("recovery_codes",), ("issued_at", "recovery_codes_remaining")),
+    # The OIDC secret, returned once in the 201 and never again.
+    OIDCClientWithSecret: (("client_secret",), ("id", "client_id", "name")),
+    # The API token's plaintext, returned once.
+    IssuedApiKey: (("token",), ("id", "name", "account_id", "scopes")),
+}
+
+
+#: The seven, in a stable order, so ``pytest -k`` and the failure output read
+#: the same on every run.
+_CREDENTIAL_MODELS: tuple[type[Any], ...] = tuple(
+    sorted(_CREDENTIAL_FIELDS, key=lambda model: model.__name__)
+)
+
+
+def _body_for(model: type[Any]) -> dict[str, Any]:
+    """A body with a credential in the model's credential fields, plain values
+    everywhere else, and ``None`` in the rest.
+
+    The ``None`` matters: it proves the ``repr`` is hiding the credential rather
+    than happening to omit an empty field.
+    """
+    import dataclasses
+
+    secret_fields, _plain = _CREDENTIAL_FIELDS[model]
+    return {
+        field.name: _CREDENTIAL_FOR[field.name] if field.name in secret_fields else None
+        for field in dataclasses.fields(model)
+    }
+
+
 @pytest.mark.leak
+class TestEveryResponseModelIsClean:
+    """The models, which the cycles above never printed.
+
+    This class exists because of a hole that was in **this file** rather than in
+    the code. Every other test here probes the client and the exceptions it
+    throws; not one of them printed a **response model**. And three of the seven
+    credential-bearing models already redacted their ``repr``, so the pattern
+    looked handled — while ``Session`` and ``MfaChallenge`` did not, and a login
+    returned a session token that any ``print``, debugger frame or failed
+    assertion put on the screen in full.
+
+    A test that checks the client's ``repr`` is not a test that checks the
+    result's. This one is, and it is a table over the models rather than seven
+    remembered cases, so a model added tomorrow is one row.
+    """
+
+    @pytest.mark.parametrize("model", _CREDENTIAL_MODELS, ids=lambda m: m.__name__)
+    def test_the_repr_does_not_print_the_credential(self, model: type[Any]) -> None:
+        instance = model.from_response(_body_for(model))
+        assert_no_credential(f"{model.__name__}: repr", repr(instance))
+        assert_no_credential(f"{model.__name__}: str", str(instance))
+
+    @pytest.mark.parametrize("model", _CREDENTIAL_MODELS, ids=lambda m: m.__name__)
+    def test_the_credential_is_STILL_reachable_as_an_attribute(self, model: type[Any]) -> None:
+        """And this is the sharp edge, asserted rather than left to be discovered.
+
+        A redacted ``repr`` protects against **accidental** printing: a debugger
+        frame, an f-string, a traceback with locals, a failed assertion. It cannot
+        protect against a caller who walks the fields on purpose, because the model
+        has to hand the credential over — that is what ``POST /v1/session`` is
+        *for*, and a package that made the credential unreadable would have broken
+        every caller that legitimately needed it.
+
+        So ``dataclasses.asdict(session)`` does contain the token, and this test
+        says so out loud. What it refuses to leave unstated is the other half: a
+        caller who believes it is safe to put a ``Session`` in a structured log
+        payload is wrong, and the rule is "do not log the response". That is the
+        caller's rule to keep, and a test is the only place it can be kept.
+        """
+        import dataclasses
+
+        instance = model.from_response(_body_for(model))
+        rendered = " ".join(every_string_in(dataclasses.asdict(instance)))
+        assert any(credential in rendered for credential in ALL_FAKE_CREDENTIALS), (
+            f"{model.__name__} is unreadable, so the redaction has gone too far"
+        )
+
+    @pytest.mark.parametrize("model", _CREDENTIAL_MODELS, ids=lambda m: m.__name__)
+    def test_the_recursive_walk_reaches_through_the_credential_field(
+        self, model: type[Any]
+    ) -> None:
+        """The walk has to recurse into containers to see a recovery-code tuple.
+
+        So this asserts the walk *finds* the credential — the same fact as the
+        test above, reached from the other side — and it is what proves
+        ``every_string_in`` still works on these shapes. A walk that quietly
+        stopped at a tuple would make that other test pass for the wrong reason.
+        """
+        found = " ".join(every_string_in(model.from_response(_body_for(model))))
+        assert any(credential in found for credential in ALL_FAKE_CREDENTIALS), model.__name__
+
+    @pytest.mark.parametrize("model", _CREDENTIAL_MODELS, ids=lambda m: m.__name__)
+    def test_and_the_redaction_says_so(self, model: type[Any]) -> None:
+        """A repr that returned nothing would pass the test above and be useless.
+
+        A developer prints an object to find out what it is, so hiding one field
+        is only acceptable if the rest is still readable. And the non-credential
+        fields named in the table must be *present*, which is the other half of
+        the claim: a repr that redacted an account id would be a repr that hid
+        everything.
+        """
+        _secret, plain = _CREDENTIAL_FIELDS[model]
+        text = repr(model.from_response(_body_for(model)))
+        assert "[redacted" in text, f"{model.__name__} hides its credential without saying so"
+        for field in plain:
+            # `None` is what the body carried, so the field name has to appear for
+            # the value to be there at all.
+            assert field in text, f"{model.__name__} dropped {field!r}, which is not a credential"
+
+    def test_the_other_six_are_not_redacted_at_all(self) -> None:
+        """They hold an identifier, an address, a status, a scope set or a
+        timestamp.
+
+        Redacting those would cost a developer the one thing they printed the
+        object for, to protect a value that is not a secret — and it would make
+        every one of these models look like it was hiding something.
+        """
+        import dataclasses
+
+        others = [m for m in _EVERY_MODEL if m not in _CREDENTIAL_FIELDS]
+        assert len(others) == 6, others
+        for model in others:
+            # A body built from the model's *own* fields, because the six do not
+            # agree on what their identifying field is called: `User` and
+            # `ApiKey` have `id`, `Introspection` has `sub`, `MfaStatus` has
+            # `enabled`. A hard-coded body would leave one of them with an empty
+            # repr and the assertion would be about nothing.
+            body = {field.name: f"value-of-{field.name}" for field in dataclasses.fields(model)}
+            text = repr(model.from_response(body))
+            assert "[redacted" not in text, f"{model.__name__} redacts a field that is not a secret"
+            assert "value-of-" in text, f"{model.__name__} hid every field, which is not redacting"
+
+    def test_a_session_repr_keeps_the_expiry_and_drops_the_token(self) -> None:
+        session = Session.from_response(
+            {"token": FAKE_SESSION_TOKEN, "expires_at": "2026-10-30T12:00:00Z"}
+        )
+        assert "2026-10-30T12:00:00Z" in repr(session)
+        assert FAKE_SESSION_TOKEN not in repr(session)
+
+    def test_a_recovery_code_count_survives_its_codes(self) -> None:
+        """Whether somebody is running low is the question a repr of this answer
+        gets asked, and it is answerable without the codes."""
+        confirmed = ConfirmedEnrollment.from_response(
+            {"recovery_codes": [FAKE_SESSION_TOKEN, FAKE_SESSION_TOKEN + "x"], "enabled": True}
+        )
+        assert "2 codes" in repr(confirmed)
+        assert FAKE_SESSION_TOKEN not in repr(confirmed)
+
+    def test_a_credential_is_still_readable_as_an_attribute(self) -> None:
+        """Redaction is about printing, not about access.
+
+        A caller that legitimately holds the response has to be able to read the
+        credential out of it — that is the whole point of ``POST /v1/session`` and
+        ``POST /v1/accounts/{id}/api-keys``.
+        """
+        assert Session.from_response({"token": "t"}).token == "t"
+        assert IssuedApiKey.from_response({"token": "t"}).token == "t"
+        assert OIDCClientWithSecret.from_response({"client_secret": "s"}).client_secret == "s"
+        assert StartedEnrollment.from_response({"secret": "s"}).secret == "s"
+        assert MfaChallenge.from_response({"challenge": "c"}).challenge == "c"
+        assert ConfirmedEnrollment.from_response({"recovery_codes": ["a"]}).recovery_codes == ("a",)
+
+
 class TestTheStaticHalf:
     """The output side: this package emits nothing, and that is an assertion.
 

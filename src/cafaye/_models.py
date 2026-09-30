@@ -23,6 +23,38 @@ is not readable: an object a caller can mutate after the client handed it over i
 an object whose invariants somebody else can break. ``slots=True`` also means a
 model has no ``__dict__``, so there is nowhere for a credential to hide by
 accident.
+
+EVERY CREDENTIAL-BEARING MODEL REDACTS ITS OWN ``repr``
+--------------------------------------------------------
+
+Seven of the thirteen models here hold something that is a credential:
+
+============================ ===============================================
+:class:`Session`             the session token, which authenticates every
+                              service in the fleet through the bearer header
+:class:`MfaChallenge`         the one-time MFA challenge
+:class:`StartedEnrollment`    the base32 TOTP secret, never re-readable
+:class:`ConfirmedEnrollment`  the recovery codes, printed once
+:class:`RecoveryCodesResponse` a second copy of the same codes
+:class:`OIDCClientWithSecret` the OIDC ``client_secret``, returned once
+:class:`IssuedApiKey`         the API token's plaintext, returned once
+============================ ===============================================
+
+All seven override ``__repr__``. The other six do not need to: they hold an
+identifier, an address, a status, a scope set or a timestamp, and a redacted repr
+that hid those would be a repr that hid everything.
+
+Two of the seven were unprotected for a while, and the reason is worth recording
+because the hole was in a *test* rather than in the code.
+``StartedEnrollment``, ``OIDCClientWithSecret`` and ``IssuedApiKey`` redacted from
+the start, so a reader reasonably concluded the models were handled — while
+``tests/test_credential_leak.py`` drove the client through every path it has
+without ever printing a **response model**, because a test that checks the
+client's ``repr`` is not a test that checks the result's. A login returned a
+session token, and any ``print``, debugger frame or failed assertion about it
+printed the token in full. That test now walks every model's ``repr`` with a
+credential planted in every field, so the set is covered by one rule rather than
+by remembering seven models.
 """
 
 from __future__ import annotations
@@ -163,6 +195,25 @@ class Session(_Model):
         data = from_mapping(body)
         return cls(token=_str(data, "token"), expires_at=_str(data, "expires_at"))
 
+    def __repr__(self) -> str:
+        """Redacted. The token is a credential and the default dataclass ``repr``
+        prints it.
+
+        This one was missing for a while, and the reason is worth recording: the
+        other credential-bearing models redact, so a reader reasonably concluded
+        the *models* were handled — and ``tests/test_credential_leak.py`` drove the
+        client through every path it has without ever printing a **response
+        model**, because a test that checks the client's ``repr`` is not a test
+        that checks the result's.
+
+        A session token is not a lesser credential for being the one everybody has:
+        it is 256 bits from ``crypto/rand``, it authenticates the other five
+        services through the bearer header, and it is what a caller hands to
+        ``set_token`` after signing in. The expiry is kept, because it is the
+        field a developer debugging a 401 actually needs.
+        """
+        return f"Session(token=[redacted], expires_at={self.expires_at!r})"
+
 
 @dataclass(frozen=True, slots=True)
 class MfaChallenge(_Model):
@@ -189,6 +240,20 @@ class MfaChallenge(_Model):
             mfa_required=_bool(data, "mfa_required"),
             challenge=_str(data, "challenge"),
             expires_at=_str(data, "expires_at"),
+        )
+
+    def __repr__(self) -> str:
+        """Redacted, and the challenge **is** a credential.
+
+        identity's document calls it "a one-time credential for ``POST
+        /v1/session/mfa``, valid for ten minutes and single-use", which is exactly
+        the lifetime profile that makes it worth stealing and exactly the one
+        nobody thinks of when they print a login result to see whether MFA is on.
+        Same reason :class:`Session` redacts its token.
+        """
+        return (
+            f"MfaChallenge(mfa_required={self.mfa_required!r}, challenge=[redacted], "
+            f"expires_at={self.expires_at!r})"
         )
 
 
@@ -276,7 +341,7 @@ class StartedEnrollment(_Model):
         """
         return (
             f"StartedEnrollment(enrollment_id={self.enrollment_id!r}, "
-            f"secret=[redacted: a credential-shaped value was present], "
+            f"secret=[redacted], "
             f"method={self.method!r}, digits={self.digits!r}, "
             f"period_seconds={self.period_seconds!r}, algorithm={self.algorithm!r}, "
             f"expires_at={self.expires_at!r}, replaced={self.replaced!r})"
@@ -311,6 +376,21 @@ class ConfirmedEnrollment(_Model):
             replaced_existing_secret=_bool(data, "replaced_existing_secret"),
         )
 
+    def __repr__(self) -> str:
+        """Redacted: recovery codes are the account's way back in.
+
+        "Printed once. There is no endpoint that re-reads them", and a set of
+        codes in a log is a set of codes in a support ticket. Their **count** is
+        kept, because that is what a caller checks to decide whether to warn
+        somebody that they are running low.
+        """
+        return (
+            f"ConfirmedEnrollment(enabled={self.enabled!r}, method={self.method!r}, "
+            f"enrolled_at={self.enrolled_at!r}, "
+            f"recovery_codes=[redacted: {len(self.recovery_codes)} codes], "
+            f"replaced_existing_secret={self.replaced_existing_secret!r})"
+        )
+
 
 @dataclass(frozen=True, slots=True)
 class RecoveryCodesResponse(_Model):
@@ -329,6 +409,18 @@ class RecoveryCodesResponse(_Model):
             recovery_codes=_str_list(data, "recovery_codes"),
             issued_at=_str(data, "issued_at"),
             recovery_codes_remaining=_int(data, "recovery_codes_remaining"),
+        )
+
+    def __repr__(self) -> str:
+        """Redacted, for the reason :class:`ConfirmedEnrollment` redacts.
+
+        The old set is destroyed in the same transaction that writes the new one,
+        so these are the only copy there will ever be.
+        """
+        return (
+            f"RecoveryCodesResponse(recovery_codes=[redacted: "
+            f"{len(self.recovery_codes)} codes], issued_at={self.issued_at!r}, "
+            f"recovery_codes_remaining={self.recovery_codes_remaining!r})"
         )
 
 
@@ -406,7 +498,7 @@ class OIDCClientWithSecret(OIDCClient):
         dataclass ``repr`` prints it."""
         return (
             f"OIDCClientWithSecret(id={self.id!r}, client_id={self.client_id!r}, "
-            "client_secret=[redacted: a credential-shaped value was present], "
+            "client_secret=[redacted], "
             f"name={self.name!r}, created_at={self.created_at!r})"
         )
 
@@ -519,7 +611,7 @@ class IssuedApiKey(ApiKey):
         return (
             f"IssuedApiKey(id={self.id!r}, name={self.name!r}, "
             f"account_id={self.account_id!r}, scopes={self.scopes!r}, "
-            "token=[redacted: a credential-shaped value was present])"
+            "token=[redacted])"
         )
 
 
