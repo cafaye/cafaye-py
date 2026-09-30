@@ -50,6 +50,7 @@ from __future__ import annotations
 
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
+from types import MappingProxyType
 from typing import Any, Final, TypeVar, overload
 
 from cafaye._client import Model, _AsyncFace, _internal_bug, _SyncFace
@@ -252,107 +253,111 @@ def _session_or_challenge(body: Mapping[str, Any]) -> Session | MfaChallenge:
 #: is that repository's decision and this one is not its to make, so the two
 #: clients currently differ in surface — recorded in ``REPORT-cafaye-py-01.md`` as
 #: the obvious next packet, not as a defect in either.
-IDENTITY_OPERATIONS: Final[Mapping[str, IdentityOperation]] = {
-    operation.name: operation
-    for operation in (
-        IdentityOperation("register_user", "registerUser", "POST", "/v1/users", User.from_response),
-        IdentityOperation(
-            "create_session", "createSession", "POST", "/v1/session", _session_or_challenge
-        ),
-        IdentityOperation("delete_session", "deleteSession", "DELETE", "/v1/session"),
-        IdentityOperation(
-            "complete_second_factor",
-            "completeSecondFactor",
-            "POST",
-            "/v1/session/mfa",
-            Session.from_response,
-        ),
-        IdentityOperation(
-            "get_mfa_status", "getMFAStatus", "GET", "/v1/mfa", MfaStatus.from_response
-        ),
-        IdentityOperation("disable_mfa", "disableMFA", "DELETE", "/v1/mfa"),
-        IdentityOperation(
-            "start_mfa_enrollment",
-            "startMFAEnrollment",
-            "POST",
-            "/v1/mfa/enrollments",
-            StartedEnrollment.from_response,
-        ),
-        IdentityOperation(
-            "confirm_mfa_enrollment",
-            "confirmMFAEnrollment",
-            "POST",
-            "/v1/mfa/enrollments/{enrollment_id}/confirm",
-            ConfirmedEnrollment.from_response,
-        ),
-        IdentityOperation(
-            "regenerate_mfa_recovery_codes",
-            "regenerateMFARecoveryCodes",
-            "POST",
-            "/v1/mfa/recovery-codes",
-            RecoveryCodesResponse.from_response,
-        ),
-        IdentityOperation(
-            "get_current_user", "getCurrentUser", "GET", "/v1/me", User.from_response
-        ),
-        IdentityOperation(
-            "register_oidc_client",
-            "registerOIDCClient",
-            "POST",
-            "/v1/accounts/{account_id}/oidc-clients",
-            OIDCClientWithSecret.from_response,
-        ),
-        IdentityOperation(
-            "list_oidc_clients",
-            "listOIDCClients",
-            "GET",
-            "/v1/accounts/{account_id}/oidc-clients",
-            _Page,
-        ),
-        IdentityOperation(
-            "get_oidc_client",
-            "getOIDCClient",
-            "GET",
-            "/v1/accounts/{account_id}/oidc-clients/{client_id}",
-            OIDCClient.from_response,
-        ),
-        IdentityOperation(
-            "revoke_oidc_client",
-            "revokeOIDCClient",
-            "DELETE",
-            "/v1/accounts/{account_id}/oidc-clients/{client_id}",
-        ),
-        IdentityOperation(
-            "mint_api_key",
-            "mintAPIKey",
-            "POST",
-            "/v1/accounts/{account_id}/api-keys",
-            IssuedApiKey.from_response,
-        ),
-        IdentityOperation(
-            "list_api_keys",
-            "listAPIKeys",
-            "GET",
-            "/v1/accounts/{account_id}/api-keys",
-            _Page,
-        ),
-        IdentityOperation(
-            "revoke_api_key",
-            "revokeAPIKey",
-            "DELETE",
-            "/v1/accounts/{account_id}/api-keys/{key_id}",
-        ),
-        IdentityOperation(
-            "introspect_api_key",
-            "introspectAPIKey",
-            "POST",
-            "/v1/introspections",
-            Introspection.from_response,
-        ),
-        IdentityOperation("liveness", "liveness", "GET", "/healthz", Health.from_response),
-        IdentityOperation("readiness", "readiness", "GET", "/readyz", Health.from_response),
-    )
-}
+IDENTITY_OPERATIONS: Final[Mapping[str, IdentityOperation]] = MappingProxyType(
+    {
+        operation.name: operation
+        for operation in (
+            IdentityOperation(
+                "register_user", "registerUser", "POST", "/v1/users", User.from_response
+            ),
+            IdentityOperation(
+                "create_session", "createSession", "POST", "/v1/session", _session_or_challenge
+            ),
+            IdentityOperation("delete_session", "deleteSession", "DELETE", "/v1/session"),
+            IdentityOperation(
+                "complete_second_factor",
+                "completeSecondFactor",
+                "POST",
+                "/v1/session/mfa",
+                Session.from_response,
+            ),
+            IdentityOperation(
+                "get_mfa_status", "getMFAStatus", "GET", "/v1/mfa", MfaStatus.from_response
+            ),
+            IdentityOperation("disable_mfa", "disableMFA", "DELETE", "/v1/mfa"),
+            IdentityOperation(
+                "start_mfa_enrollment",
+                "startMFAEnrollment",
+                "POST",
+                "/v1/mfa/enrollments",
+                StartedEnrollment.from_response,
+            ),
+            IdentityOperation(
+                "confirm_mfa_enrollment",
+                "confirmMFAEnrollment",
+                "POST",
+                "/v1/mfa/enrollments/{enrollment_id}/confirm",
+                ConfirmedEnrollment.from_response,
+            ),
+            IdentityOperation(
+                "regenerate_mfa_recovery_codes",
+                "regenerateMFARecoveryCodes",
+                "POST",
+                "/v1/mfa/recovery-codes",
+                RecoveryCodesResponse.from_response,
+            ),
+            IdentityOperation(
+                "get_current_user", "getCurrentUser", "GET", "/v1/me", User.from_response
+            ),
+            IdentityOperation(
+                "register_oidc_client",
+                "registerOIDCClient",
+                "POST",
+                "/v1/accounts/{account_id}/oidc-clients",
+                OIDCClientWithSecret.from_response,
+            ),
+            IdentityOperation(
+                "list_oidc_clients",
+                "listOIDCClients",
+                "GET",
+                "/v1/accounts/{account_id}/oidc-clients",
+                _Page,
+            ),
+            IdentityOperation(
+                "get_oidc_client",
+                "getOIDCClient",
+                "GET",
+                "/v1/accounts/{account_id}/oidc-clients/{client_id}",
+                OIDCClient.from_response,
+            ),
+            IdentityOperation(
+                "revoke_oidc_client",
+                "revokeOIDCClient",
+                "DELETE",
+                "/v1/accounts/{account_id}/oidc-clients/{client_id}",
+            ),
+            IdentityOperation(
+                "mint_api_key",
+                "mintAPIKey",
+                "POST",
+                "/v1/accounts/{account_id}/api-keys",
+                IssuedApiKey.from_response,
+            ),
+            IdentityOperation(
+                "list_api_keys",
+                "listAPIKeys",
+                "GET",
+                "/v1/accounts/{account_id}/api-keys",
+                _Page,
+            ),
+            IdentityOperation(
+                "revoke_api_key",
+                "revokeAPIKey",
+                "DELETE",
+                "/v1/accounts/{account_id}/api-keys/{key_id}",
+            ),
+            IdentityOperation(
+                "introspect_api_key",
+                "introspectAPIKey",
+                "POST",
+                "/v1/introspections",
+                Introspection.from_response,
+            ),
+            IdentityOperation("liveness", "liveness", "GET", "/healthz", Health.from_response),
+            IdentityOperation("readiness", "readiness", "GET", "/readyz", Health.from_response),
+        )
+    }
+)
 
 
 class IdentityService:
@@ -378,13 +383,41 @@ class IdentityService:
         self._run(name, model=None, params=params)
 
     @overload
-    def _run(self, name: str, *, model: None, params: Mapping[str, Any]) -> None: ...
+    def _run(
+        self,
+        name: str,
+        *,
+        model: None,
+        params: Mapping[str, Any],
+        body: Mapping[str, Any] | None = None,
+    ) -> None: ...
 
     @overload
-    def _run(self, name: str, *, model: Model[T], params: Mapping[str, Any]) -> T: ...
+    def _run(
+        self,
+        name: str,
+        *,
+        model: Model[T],
+        params: Mapping[str, Any],
+        body: Mapping[str, Any] | None = None,
+    ) -> T: ...
 
-    def _run(self, name: str, *, model: DeclaredModel, params: Mapping[str, Any]) -> Any:
+    def _run(
+        self,
+        name: str,
+        *,
+        model: DeclaredModel,
+        params: Mapping[str, Any],
+        body: Mapping[str, Any] | None = None,
+    ) -> Any:
         """The one body all four helpers share.
+
+        ``params`` and ``body`` are separate arguments here and separate
+        arguments to ``_exchange``, and they have to be: httpx substitutes
+        ``{name}`` in the path from ``params`` and builds the query from the same
+        mapping, while the body is a separate ``json=``. Merging them put the
+        entire body into the query string and left every path parameter
+        unsubstituted, which is a client that sends ``/v1/accounts/{account_id}``.
 
         Overloaded rather than typed ``Any`` because the two cases really do have
         different return types: an operation that declares a response always
@@ -403,6 +436,7 @@ class IdentityService:
                 path=operation.path,
                 operation=operation.qualified,
                 params=params or None,
+                json=dict(body) if body is not None else None,
                 model=model,
             )
         )
@@ -415,10 +449,10 @@ class IdentityService:
         ``additionalProperties: false`` would reject it. So ``**params`` is the
         path and the second argument is the body, with no overlap possible.
         """
-        return self._run(name, model=model, params={**params, "json": dict(body)})
+        return self._run(name, model=model, params=params, body=body)
 
     def _post_void(self, name: str, body: Mapping[str, Any], **params: Any) -> None:
-        self._run(name, model=None, params={**params, "json": dict(body)})
+        self._run(name, model=None, params=params, body=body)
 
     # -- sessions ---------------------------------------------------------
 
@@ -635,12 +669,33 @@ class AsyncIdentityService:
         await self._run(name, model=None, params=params)
 
     @overload
-    async def _run(self, name: str, *, model: None, params: Mapping[str, Any]) -> None: ...
+    async def _run(
+        self,
+        name: str,
+        *,
+        model: None,
+        params: Mapping[str, Any],
+        body: Mapping[str, Any] | None = None,
+    ) -> None: ...
 
     @overload
-    async def _run(self, name: str, *, model: Model[T], params: Mapping[str, Any]) -> T: ...
+    async def _run(
+        self,
+        name: str,
+        *,
+        model: Model[T],
+        params: Mapping[str, Any],
+        body: Mapping[str, Any] | None = None,
+    ) -> T: ...
 
-    async def _run(self, name: str, *, model: DeclaredModel, params: Mapping[str, Any]) -> Any:
+    async def _run(
+        self,
+        name: str,
+        *,
+        model: DeclaredModel,
+        params: Mapping[str, Any],
+        body: Mapping[str, Any] | None = None,
+    ) -> Any:
         """The one body all four helpers share. See the sync face's ``_run``."""
         _declared(name, model)
         operation = IDENTITY_OPERATIONS[name]
@@ -651,15 +706,16 @@ class AsyncIdentityService:
                 path=operation.path,
                 operation=operation.qualified,
                 params=params or None,
+                json=dict(body) if body is not None else None,
                 model=model,
             )
         )
 
     async def _post(self, name: str, model: Model[T], body: Mapping[str, Any], **params: Any) -> T:
-        return await self._run(name, model=model, params={**params, "json": dict(body)})
+        return await self._run(name, model=model, params=params, body=body)
 
     async def _post_void(self, name: str, body: Mapping[str, Any], **params: Any) -> None:
-        await self._run(name, model=None, params={**params, "json": dict(body)})
+        await self._run(name, model=None, params=params, body=body)
 
     # -- sessions ---------------------------------------------------------
 

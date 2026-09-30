@@ -1,0 +1,47 @@
+#!/usr/bin/env bash
+#
+# The env-gated tier. Talks to a real cafaye deployment.
+#
+#   bin/live          # run it, or fail explaining why it cannot
+#
+# It is a separate script rather than a pytest flag because the two tiers fail
+# for different reasons and a flag would let one invocation quietly do neither.
+# The unit tier cannot be satisfied by a credential; this tier cannot be satisfied
+# by a mock.
+#
+# IT DOES NOT SKIP
+# -----------------
+# If `$CAFAYE_LIVE_BASE_URL` or `$CAFAYE_LIVE_TOKEN` is missing, this exits 1 with
+# a sentence saying which one. It does not exit 0 having run nothing. The
+# difference is the entire reason this file exists: a demanded tier that skips is
+# a green badge over an unexamined claim.
+#
+# `-o addopts=""` is load-bearing. `pyproject.toml` puts `--cov` in addopts, and
+# the coverage gate is `fail_under = 100` against the *unit* suite. Inheriting
+# those flags here would make this tier fail on coverage it was never meant to
+# measure, and the fix for that would be to pass `--no-cov` — which is one keystroke
+# away from also disabling the coverage gate in `bin/prime`. Clearing addopts means
+# this tier's behaviour cannot be changed by an edit to the other tier's config.
+set -euo pipefail
+
+REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+cd "$REPO_ROOT"
+
+for var in CAFAYE_LIVE_BASE_URL CAFAYE_LIVE_TOKEN; do
+  if [ -z "${!var:-}" ]; then
+    echo "live: \$$var is not set, so the env-gated tier cannot run." >&2
+    echo "live: this is a failure and not a skip. Run 'bin/prime --live' only when" >&2
+    echo "live: a deployment and a scoped credential are actually available, or the" >&2
+    echo "live: green badge above this line is a claim about a tier nobody checked." >&2
+    exit 1
+  fi
+done
+
+echo "==> env-gated tier: $CAFAYE_LIVE_BASE_URL (credential from \$CAFAYE_LIVE_TOKEN)"
+echo "    the credential is never printed, logged, or passed as an argument"
+uv run pytest live \
+  -o addopts="" \
+  -p no:cacheprovider \
+  --no-header \
+  -q
+echo "==> env-gated tier: green"

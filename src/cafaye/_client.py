@@ -80,6 +80,7 @@ from collections.abc import Callable, Generator, Mapping
 from dataclasses import dataclass
 from types import TracebackType
 from typing import Any, Protocol, Self, TypeVar, cast
+from urllib.parse import quote
 
 import httpx
 
@@ -199,11 +200,14 @@ class PendingRequest:
     """
 
     method: str
+    #: The **finished** URL. Path placeholders are already substituted, because
+    #: httpx does not do it: given ``https://x/v1/accounts/{account_id}`` and
+    #: ``params={"account_id": "a"}`` it produces
+    #: ``https://x/v1/accounts/%7Baccount_id%7D?account_id=a``.
     url: str
     headers: Mapping[str, str]
-    #: Path parameters and query parameters, merged. httpx substitutes ``{name}``
-    #: placeholders in the path from the same mapping it builds the query from,
-    #: which is why one dict carries both.
+    #: What is left after the path placeholders were consumed: the query, and only
+    #: the query.
     #:
     #: ``Any`` rather than ``object`` because this mapping goes straight into
     #: httpx's ``build_request(params=...)``, whose parameter type is a closed
@@ -372,12 +376,13 @@ class _BaseCafaye:
         """
         headers: dict[str, str] = dict(self._default_headers)
         attach_credential(headers, self._token)
+        url, query = _resolve_path(f"{self._base_urls[service]}{path}", params)
         return self._run(
             PendingRequest(
                 method=method,
-                url=f"{self._base_urls[service]}{path}",
+                url=url,
                 headers=headers,
-                params=params,
+                params=query,
                 json_body=json,
             ),
             operation=operation,
@@ -578,6 +583,42 @@ class _BaseCafaye:
         """
         kind = self._token_kind.value if self._token_kind is not None else "no credential"
         return f"{type(self).__name__}(base_urls={self._base_urls!r}, credential=<{kind}>)"
+
+
+def _resolve_path(url: str, params: Mapping[str, Any] | None) -> tuple[str, dict[str, Any]]:
+    """Complete the path's ``{name}`` placeholders, and return what is left over.
+
+    Two returns, and the split is derived rather than declared: **anything named in
+    the path is a path parameter, and everything else is a query parameter.** The
+    alternative is a second list per operation saying which is which, which is a
+    second place to forget — and a service that renames a path parameter would
+    then have two files to change rather than one.
+
+    This exists because httpx does not do it. Given
+    ``https://identity.cafaye.com/v1/accounts/{account_id}/api-keys`` and
+    ``params={"account_id": "acc_1", "limit": 10}``, ``build_request`` produces::
+
+        https://identity.cafaye.com/v1/accounts/%7Baccount_id%7D/api-keys?account_id=acc_1&limit=10
+
+    The braces are percent-encoded, the identifier is in the query string where
+    nothing reads it, and the request goes to a route that does not exist. Every
+    operation with a path parameter in identity's document — nine of the twenty —
+    was affected, and the mock transport never noticed, because a mock answers any
+    URL. The unit suite asserted on ``request.url.path`` for three operations and
+    read the braces as correct.
+
+    Values are percent-encoded, and encoded strictly: a path parameter carrying a
+    ``/`` or a ``?`` is a caller passing something that is not an identifier, and
+    letting it through unencoded would turn one path segment into two and reach a
+    different route than the caller named.
+    """
+    query = dict(params or {})
+    for name in list(query):
+        placeholder = "{" + name + "}"
+        if placeholder in url:
+            value = query.pop(name)
+            url = url.replace(placeholder, quote(str(value), safe=""))
+    return url, query
 
 
 def _is_problem_media_type(content_type: str | None) -> bool:

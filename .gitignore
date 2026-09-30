@@ -17,6 +17,9 @@ venv/
 # report about another branch (MD12).
 .coverage
 .coverage.*
+# `pytest-cov`'s `--cov-report=xml` writes this at the repository root on every
+# run and has no output-path option, so it is ignored rather than moved.
+coverage.xml
 htmlcov/
 .pytest_cache/
 .ruff_cache/

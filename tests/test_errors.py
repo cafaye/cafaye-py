@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import inspect
 import json
+from types import ModuleType
 from typing import Any
 
 import httpx
@@ -562,60 +563,125 @@ class TestConfigurationErrors:
                 _Cafaye(base_url="https://a.example.test", timeout=bad)
 
 
-class TestIsCafayeErrorAcrossTheBoundary:
-    """The cross-copy test, done properly rather than by pretending.
+def _second_copy_of_the_errors_module() -> ModuleType:
+    """Load ``cafaye/_errors.py`` a second time, under a second name.
 
-    A second *installed* copy of this package cannot be produced inside one
-    interpreter without a subprocess, so the assertion here is about the
-    mechanism: the brand is looked up by name through ``globals()``, so a module
-    loaded twice — which is what ``importlib.reload`` does — agrees with itself.
+    This is the real shape of the problem rather than a proxy for it. Two copies
+    of ``cafaye-py`` in one dependency tree — a workspace link beside a pinned
+    release, a transitive duplicate — means two ``CafayeError`` class objects,
+    and an error thrown by one is not an instance of the other. ``importlib``
+    does that here without a subprocess, a virtualenv or a second install.
+
+    **Not** ``importlib.reload``, which is the obvious tool and the wrong one.
+    A reload rebinds the names in ``cafaye._errors`` but not the ones
+    ``cafaye/__init__.py`` re-exported at import time, so after a reload the
+    package and its own submodule disagree about what ``CafayeProtocolError`` is.
+    Every ``from cafaye import CafayeProtocolError`` in the suite then compares
+    against a class the client no longer raises, and ``pytest.raises`` stops
+    catching — which is how a suite becomes order-dependent, silently, because the
+    failure only appears when the reload test ran first.
+
+    The module is given the name ``cafaye._errors_copy`` so that its one relative
+    import, ``from ._redact import ...``, resolves against the real package. That
+    is not a compromise: two installed copies really would share nothing, but the
+    thing under test is the *error* class identity, and a shared dependency does
+    not affect it.
+    """
+    import importlib.util
+    import sys
+
+    import cafaye._errors as installed
+
+    path = installed.__file__
+    assert path is not None, "cafaye._errors has no file, so it cannot be copied"
+    spec = importlib.util.spec_from_file_location("cafaye._errors_copy", path)
+    assert spec is not None and spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    # Registered *before* execution, and that ordering is load-bearing rather than
+    # tidiness: `@dataclass` resolves its own module out of `sys.modules` to find
+    # the module globals, so an unregistered copy raises
+    # `AttributeError: 'NoneType' object has no attribute '__dict__'` from inside
+    # the standard library the moment the first class body is created.
+    sys.modules[spec.name] = module
+    try:
+        spec.loader.exec_module(module)
+    except BaseException:
+        del sys.modules[spec.name]
+        raise
+    return module
+
+
+class TestIsCafayeErrorAcrossTheBoundary:
+    """The cross-copy test, done with an actual second copy.
+
+    A second *installed* copy cannot be produced without a subprocess, but a
+    second *loaded* copy can, and it has the property that matters: a distinct set
+    of class objects, defined by the same source.
     """
 
-    def test_reloading_the_module_still_agrees_with_itself(self) -> None:
-        import importlib
+    def test_a_second_copy_is_genuinely_a_second_set_of_classes(self) -> None:
+        """The premise. Asserted rather than assumed.
 
-        import cafaye._errors as errors_module
-
-        reloaded = importlib.reload(errors_module)
-        error = reloaded.CafayeProblemError(
-            "a problem",
-            type="about:blank",
-            title="t",
-            status=500,
-        )
-        assert reloaded.is_cafaye_error(error)
-
-    def test_an_error_from_before_the_reload_is_recognised_after_it(self) -> None:
-        """The case the class docstring actually claims, and the only one that
-        exercises the marker.
-
-        ``importlib.reload`` builds a **new** ``CafayeError`` class object, so an
-        error constructed before the reload is not an instance of the class the
-        reloaded module now names, and ``isinstance`` alone answers ``False``.
-        That is the same failure two installed copies of this package produce in
-        one dependency tree, and it is silent: it looks like a bug in the
-        consumer's own error handling, which is the worst place to go looking for
-        it.
-
-        So the assertion that matters is not that the reloaded module agrees with
-        itself — that one passes on ``isinstance`` alone and proves nothing about
-        the marker. It is that the reloaded module still recognises an error
-        minted by the *old* class, which it can only do through
-        ``__cafaye_error__``.
+        If this ever stopped holding — if the loader handed back the installed
+        module — the test below would pass on ``isinstance`` alone and would
+        prove nothing about the marker.
         """
-        import importlib
+        import cafaye._errors as installed
 
-        import cafaye._errors as errors_module
+        second = _second_copy_of_the_errors_module()
+        assert second.CafayeError is not installed.CafayeError
+        assert second.CafayeProblemError is not installed.CafayeProblemError
+        assert second.__name__ == "cafaye._errors_copy"
 
-        before = errors_module.CafayeProblemError(
+    def test_the_marker_is_what_makes_the_two_copies_agree(self) -> None:
+        """The claim the docstring actually makes.
+
+        ``isinstance`` answers ``False`` across the boundary, and that failure is
+        silent: to a consumer it looks like a bug in their own error handling,
+        which is the worst place to go looking for one. So the assertion is not
+        that the second copy agrees with itself — that passes on ``isinstance``
+        alone — but that it recognises an error minted by the *first* copy, which
+        it can only do by reading ``__cafaye_error__`` off the instance.
+        """
+        import cafaye._errors as installed
+
+        second = _second_copy_of_the_errors_module()
+        error = installed.CafayeProblemError("a problem", type="about:blank", title="t", status=500)
+
+        assert not isinstance(error, second.CafayeError)
+        assert second.is_cafaye_error(error)
+        assert installed.is_cafaye_error(
+            second.CafayeProblemError("a problem", type="about:blank", title="t", status=500)
+        )
+
+    def test_the_marker_is_the_same_string_in_both_copies(self) -> None:
+        """A dunder, so both copies resolve it to the same name.
+
+        This is the whole reason the brand is a dunder rather than a module-level
+        constant compared by identity: two copies of this module have two
+        different ``_ERROR_MARKER`` objects, and an ``is`` comparison would fail
+        across the boundary for exactly the reason the test above needs to pass.
+        """
+        import cafaye._errors as _errors_module
+
+        second = _second_copy_of_the_errors_module()
+
+        # Two names, and conflating them is the mistake this test is written
+        # against: `_ERROR_MARKER` is the *string* the lookup uses, and
+        # `__cafaye_error__` is the boolean flag the class carries under it.
+        assert second._ERROR_MARKER == "__cafaye_error__"
+        assert CafayeProblemError.__cafaye_error__ is True
+
+        # The two copies agree on the *name*. They do not have to agree on the
+        # object: both spellings are the same string literal here, so CPython
+        # interns them into one object, and an `is not` assertion would be a
+        # claim about the interpreter's constant table rather than about this
+        # package. What has to hold is the lookup, and it is asserted as a lookup.
+        assert second._ERROR_MARKER == _errors_module._ERROR_MARKER
+        error = _errors_module.CafayeProblemError(
             "a problem", type="about:blank", title="t", status=500
         )
-        reloaded = importlib.reload(errors_module)
-
-        # The premise, asserted rather than assumed: the reload really did replace
-        # the class, so `isinstance` really would have said no.
-        assert not isinstance(before, reloaded.CafayeError)
-        assert reloaded.is_cafaye_error(before)
+        assert getattr(error, second._ERROR_MARKER, False) is True
 
     def test_a_plain_exception_is_never_mistaken_for_one(self) -> None:
         values: list[Any] = [None, 1, "x", b"x", [], {}, ValueError("x"), KeyboardInterrupt]

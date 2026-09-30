@@ -1,0 +1,135 @@
+name: ci
+
+on:
+  push:
+    branches: [master]
+  pull_request:
+  # The env-gated tier cannot run on a push: it needs a credential, and a fork's
+  # push has none. A schedule and a manual dispatch are the two moments it is
+  # actually meaningful, and both are declared here rather than left to whoever
+  # remembers.
+  schedule:
+    # 06:17 UTC daily. Not 06:00, because every other scheduled workflow in this
+    # fleet fires at 06:00 and a fleet-wide thundering herd against six
+    # deployments at the same minute is how a self-hosted runner falls over.
+    - cron: "17 6 * * *"
+  workflow_dispatch:
+    inputs:
+      tier:
+        description: "Which tier to demand"
+        type: choice
+        options: [unit, live, both]
+        default: both
+        required: true
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  unit:
+    name: bin/prime (python ${{ matrix.python }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        # mise.toml pins 3.14.7 as the *development* interpreter and
+        # `requires-python` says ">=3.11". A floor that is only ever tested at the
+        # floor is a floor nobody has checked anything above, so the range is
+        # tested at both ends and in the middle.
+        #
+        # 3.11 is the floor `pyproject.toml` declares and the version mypy is
+        # configured to analyse against (`python_version = "3.11"`), so a 3.12-only
+        # construct in this package would be a mypy error as well as a runtime one.
+        python: ["3.11", "3.12", "3.13", "3.14"]
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python }}
+
+      # The gate is one named command, and this is it. Not a re-implementation of
+      # it in YAML: a CI job that runs something other than the local gate proves
+      # nothing about the local gate, and the two drift within a month.
+      - name: bin/prime
+        run: ./bin/prime
+
+      - name: the gate left the tree clean
+        # A different check from anything inside the gate, and it is the one that
+        # catches a generated or formatted file that stopped being committed.
+        # `git diff` alone is blind to an untracked file, so --porcelain is checked
+        # too.
+        run: |
+          git diff --exit-code
+          test -z "$(git status --porcelain -- src tests live)" \
+            || { echo "::error::the tree changed during the gate"; \
+                 git status --porcelain -- src tests live; exit 1; }
+
+      - name: no dependency advisory in the dev tree
+        run: uv export --frozen --no-emit-project --all-groups | uvx pip-audit --require-hashes=false -r /dev/stdin
+
+  live:
+    name: bin/prime --live (the env-gated tier)
+    # Every trigger EXCEPT a push or a pull request from a fork, because neither
+    # has this repository's secrets. A job that ran and found nothing to talk to
+    # would be the false green this whole arrangement exists to prevent.
+    if: >-
+      github.event_name == 'workflow_dispatch'
+      || github.event_name == 'schedule'
+    runs-on: ubuntu-latest
+    environment: cafaye-live
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+
+      # NO `continue-on-error`, and no `if: secrets.X != ''` guard. Both are the
+      # same false green wearing different hats: a job that quietly does not run
+      # reports the same conclusion as one that ran and found nothing. If the
+      # secrets are not configured the job goes red and says so, which is the
+      # correct outcome for a demanded tier.
+      - name: fail loudly if the tier was not configured
+        env:
+          CAFAYE_LIVE_BASE_URL: ${{ secrets.CAFAYE_LIVE_BASE_URL }}
+          CAFAYE_LIVE_TOKEN: ${{ secrets.CAFAYE_LIVE_TOKEN }}
+        run: |
+          missing=0
+          for var in CAFAYE_LIVE_BASE_URL CAFAYE_LIVE_TOKEN; do
+            if [ -z "${!var}" ]; then
+              echo "::error::$var is not configured on the 'cafaye-live' environment."
+              missing=1
+            fi
+          done
+          if [ "$missing" = "1" ]; then
+            echo "::error::The env-gated tier was demanded and cannot run. A tier that" \
+                 "skips is a green badge over an unexamined claim; fix the environment" \
+                 "or stop demanding the tier."
+            exit 1
+          fi
+
+      - name: the credential is never echoed
+        # Cheap, and it is the check a reader of this file should be able to
+        # confirm by eye: the token reaches the process as an environment
+        # variable and is never an argument, never interpolated into a command
+        # line, and never printed. `set -x` is off and the only `echo`s below name
+        # the variable, not its value.
+        run: |
+          set +x
+          echo "credential present: ${CAFAYE_LIVE_TOKEN:+yes}${CAFAYE_LIVE_TOKEN:-no}"
+          echo "base url: ${CAFAYE_LIVE_BASE_URL}"
+
+      - name: bin/live
+        env:
+          CAFAYE_LIVE_BASE_URL: ${{ secrets.CAFAYE_LIVE_BASE_URL }}
+          CAFAYE_LIVE_TOKEN: ${{ secrets.CAFAYE_LIVE_TOKEN }}
+        run: ./bin/live

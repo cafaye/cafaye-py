@@ -130,7 +130,7 @@ import ssl
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from enum import StrEnum
-from typing import ClassVar, TypeGuard
+from typing import ClassVar, Final, TypeGuard
 
 import httpx
 
@@ -707,6 +707,24 @@ def problem_error_from(
     )
 
 
+#: The one media type core reserves for failures. Duplicated from
+#: ``_client._is_problem_media_type`` rather than imported, because ``_client``
+#: imports this module and a module that imports its own importer is a cycle
+#: dressed up as a convenience. Three lines, and this file is the lower layer.
+_PROBLEM_MEDIA_TYPE: Final = "application/problem+json"
+
+
+def _is_problem_media_type(content_type: str | None) -> bool:
+    """Is this ``Content-Type`` the one core reserves for failures?
+
+    A parameter such as ``; charset=utf-8`` does not change the answer, and a
+    service behind a proxy that rewrote the charset parameter is common.
+    """
+    if content_type is None:
+        return False
+    return content_type.split(";")[0].strip().lower() == _PROBLEM_MEDIA_TYPE
+
+
 def protocol_error_from(
     *,
     status: int,
@@ -729,13 +747,28 @@ def protocol_error_from(
     where = f"{operation}: " if operation else ""
 
     if 200 <= status < 300:
+        # Two different faults, and one message for both of them is a message that
+        # is wrong half the time. A 2xx whose body really is a problem document is
+        # a service using the failure channel for a success; a 2xx with no body
+        # where the operation's document declares one is a service that answered
+        # without answering. The attributes already told them apart -- only the
+        # prose did not.
+        if problem_shaped or (content_type is not None and _is_problem_media_type(content_type)):
+            because = (
+                "carried an application/problem+json body, which core's conventions reserve "
+                "for failures. Treating it as a success would hand the caller a problem "
+                "document where its annotation promised a result, so this is raised instead. "
+                "The service is not following its own contract."
+            )
+        else:
+            because = (
+                f"carried no body at all, and this operation's document declares one. The "
+                f"status is {status} and the response is empty, so there is nothing to decode "
+                "and nothing to return. Returning None here would put a None the annotation "
+                "says is impossible in front of every caller."
+            )
         return CafayeProtocolError(
-            redact(
-                f"{where}HTTP {status} carried an application/problem+json body, which "
-                "core's conventions reserve for failures. Treating it as a success would hand "
-                "the caller a problem document where its annotation promised a result, so "
-                "this is raised instead. The service is not following its own contract."
-            ),
+            redact(f"{where}HTTP {status} {because}"),
             status=status,
             content_type=content_type,
             problem_shaped=problem_shaped,

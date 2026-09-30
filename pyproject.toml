@@ -129,7 +129,7 @@ markers = [
 [tool.mypy]
 python_version = "3.11"
 mypy_path = "src"
-packages = ["cafaye", "tests"]
+packages = ["cafaye", "tests", "live"]
 strict = true
 warn_unreachable = true
 warn_unused_ignores = true
@@ -255,6 +255,13 @@ ignore = [
 # flag that says "there is no credential here" is the opposite of a hardcoded
 # password.
 "src/cafaye/_credentials.py" = ["S105"]
+# The env-gated tier names the two environment variables it reads and passes a
+# deliberately-invalid credential to a deployment. `S105`/`S106` are "this looks
+# like a secret"; here it is the *name* of an environment variable and a
+# `TESTONLY`-prefixed string that exists to be refused. Both are the opposite of a
+# hardcoded credential, and the string is asserted worthless by the very test that
+# uses it.
+"live/*" = ["S105", "S106"]
 
 [tool.ruff.lint.flake8-tidy-imports]
 ban-relative-imports = "parents"

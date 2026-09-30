@@ -1,0 +1,167 @@
+#!/usr/bin/env bash
+#
+# The gate. Everything that must be true before a commit lands, in one command.
+#
+#   bin/gate            the unit tier: install, format, lint, types, tests, coverage
+#   bin/gate --fast     the frozen install only
+#   bin/gate --live     additionally DEMAND the env-gated tier against a deployment
+#
+# WHY BASH AND NOT SH
+# -------------------
+# `${PIPESTATUS[0]}` does not exist in zsh, which is this machine's default shell
+# and therefore the shell a careless `sh -c "bin/gate | tee log"` runs under. Under
+# zsh a piped command's status is the status of the *last* stage, so a gate piped
+# into `tail` exits 0 no matter what the gate decided. That has already produced
+# one false green in this fleet. `set -euo pipefail` plus an explicit
+# `${PIPESTATUS[0]}` read is the whole mechanism, and it only exists in bash, so
+# the shebang is load-bearing rather than decorative.
+#
+# WHAT IT PROMISES
+# ----------------
+# Exit 0: the lockfile was installed exactly, every file is formatted, the linter
+# is clean, the type checker is clean, every test passed, and coverage met
+# `fail_under`. Anything else: nonzero, with the failing step named.
+#
+# WHY THESE STEPS IN THIS ORDER
+# -----------------------------
+#   install -> format -> lint -> types -> tests -> coverage
+#
+# Format and lint before types because they are the two that need no interpreter
+# state and therefore the two that fail fastest. Types before tests because
+# `node --test`-equivalent runners will happily report green while the code they
+# ran is not the code that ships; a type error in a service namespace is exactly
+# that. Coverage is a step of its own rather than a pytest flag so that the
+# coverage number is the gate's last word and not something `--no-cov` in a
+# developer's muscle memory can remove.
+#
+# TWO TIERS, AND THE SECOND ONE IS NOT OPTIONAL-ISH
+# -------------------------------------------------
+# The **unit tier** is what this script runs by default: it needs no credential,
+# no network and no deployment, and it is the tier that decides whether a commit
+# is allowed to exist.
+#
+# The **env-gated tier** talks to a real cafaye deployment. It is NOT run by
+# default, because a gate that demands a production credential from a
+# contributor's laptop is a gate nobody runs. It is also NOT silently skipped
+# when it is demanded: `--live` treats a missing credential as a failure rather
+# than a pass, and prints what it did and did not run. A CI job that skips the
+# hard part and reports green is worse than no CI, because a green badge is a
+# claim, and this one would be a claim about a tier nobody exercised.
+set -euo pipefail
+
+REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+cd "$REPO_ROOT"
+
+FAST=0
+LIVE=0
+for arg in "$@"; do
+  case "$arg" in
+    --fast) FAST=1 ;;
+    --live) LIVE=1 ;;
+    -h|--help)
+      sed -n '2,45p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'
+      exit 0
+      ;;
+    *)
+      echo "prime: unknown argument '$arg'. Try --fast, --live, or --help." >&2
+      exit 2
+      ;;
+  esac
+done
+
+step() { printf '\n==> %s\n' "$1"; }
+fail() {
+  echo "prime: $1" >&2
+  exit 1
+}
+
+# --- the toolchain ----------------------------------------------------------
+# No `mise install` here, deliberately. Installing a toolchain as a side effect
+# of running a gate is how a worktree ends up tested against a version nobody
+# chose, and the version is already pinned in mise.toml and locked in uv.lock.
+command -v uv >/dev/null 2>&1 || {
+  echo "prime: uv is not on PATH. Run 'mise install' first; mise.toml pins it." >&2
+  exit 127
+}
+step "toolchain"
+echo "    uv    $(uv --version)"
+echo "    python $(uv run --no-project python -c 'import sys; print(sys.version.split()[0])' 2>/dev/null || echo 'from the project venv')"
+
+# --- install ----------------------------------------------------------------
+# `uv sync --frozen` and never a bare `uv sync`: --frozen installs exactly what
+# uv.lock says and FAILS when the lock and pyproject.toml disagree. A plain
+# `uv sync` would quietly rewrite the lock, which is how a lockfile reaches
+# master having drifted from the manifest it claims to describe.
+step "uv sync --frozen (the lockfile is only a lock if the resolver is known)"
+uv sync --frozen --all-groups
+
+if [ "$FAST" = "1" ]; then
+  echo
+  echo "prime: --fast, stopping after the frozen install. Nothing was checked."
+  exit 0
+fi
+
+# --- format -----------------------------------------------------------------
+# `ruff format --check` rather than `ruff format`, so the gate reports an
+# unformatted file instead of quietly rewriting one. A gate that fixes your
+# working tree is a gate you cannot tell apart from a gate that passed.
+step "ruff format --check"
+uv run ruff format --check . || fail "not every file is formatted. Run 'uv run ruff format .' and commit the result."
+
+# --- lint -------------------------------------------------------------------
+step "ruff check"
+uv run ruff check . || fail "the linter is not clean."
+
+# --- types ------------------------------------------------------------------
+step "mypy (strict, with --warn-unreachable)"
+uv run mypy || fail "the type checker is not clean."
+
+# --- tests and coverage -----------------------------------------------------
+# No `-p no:cacheprovider` here: the cache is what makes a second run fast, and
+# this run is the one whose result is being reported.
+# No `-x`: `pyproject.toml` already sets it, and the gate wants the whole list.
+step "pytest, with coverage"
+uv run pytest --cov --cov-report=term-missing --cov-report=xml || fail "a test failed."
+
+# The coverage number is checked twice on purpose. pytest's own `fail_under`
+# comes from `[tool.coverage.report]`, and re-reading the XML here is what makes
+# the gate's claim independent of whether that setting is still wired up -- a
+# coverage gate that silently stopped enforcing is the exact failure mode
+# `--cov-fail-under` is supposed to prevent.
+step "coverage (fail_under from pyproject.toml, re-read from the XML)"
+if [ ! -f coverage.xml ]; then
+  fail "no coverage.xml was produced, so the coverage gate did not run."
+fi
+python3 - "$REPO_ROOT" <<'PYTHON'
+import sys
+import tomllib
+import xml.etree.ElementTree as ET
+
+root = sys.argv[1]
+with open(f"{root}/pyproject.toml", "rb") as handle:
+    configured = tomllib.load(handle)["tool"]["coverage"]["report"]["fail_under"]
+line_rate = float(ET.parse(f"{root}/coverage.xml").getroot().get("line-rate", "0"))
+actual = line_rate * 100
+status = "ok" if actual >= configured else "BELOW"
+print(f"    fail_under = {configured}   actual = {actual:.2f}%   {status}")
+if actual < configured:
+    sys.exit(f"prime: coverage {actual:.2f}% is below fail_under {configured}%.")
+PY
+
+# --- the tier that was not run ---------------------------------------------
+# Said out loud, every time, in the gate's own output. A reader of a green build
+# has to be able to find out what green meant without reading this file.
+echo
+echo "prime: unit tier GREEN (frozen install, format, lint, types, tests, coverage)."
+if [ "$LIVE" = "1" ]; then
+  step "env-gated tier: DEMANDED"
+  echo "    running against a real deployment; a missing credential is a FAILURE here,"
+  echo "    not a skip. That is the difference between this tier and the one above."
+  "$REPO_ROOT/bin/live" || fail "the env-gated tier failed."
+  echo "prime: env-gated tier GREEN."
+else
+  echo "prime: env-gated tier NOT RUN (0 tests skipped as unavailable, 0 not requested)."
+  echo "    It needs a live cafaye deployment and a credential, so it is not part of"
+  echo "    the default gate. Run 'bin/gate --live' to demand it. It is never skipped"
+  echo "    silently: this line is in the output of every green run."
+fi
