@@ -13,6 +13,7 @@ a code from **next month** is handled without the client knowing about it.
 
 from __future__ import annotations
 
+import inspect
 import json
 from typing import Any
 
@@ -35,6 +36,7 @@ from cafaye import (
     CafayeValidationError,
     is_cafaye_error,
 )
+from cafaye._services.identity import IdentityService
 from conftest import async_client, json_response, problem_response, sync_client
 
 # core's reserved list, from `docs/openapi-conventions.md`, and the class each one
@@ -331,9 +333,32 @@ class TestNonProblemFailures:
         assert error.problem_shaped is False
 
     def test_an_empty_204_is_a_success_with_no_body(self) -> None:
-        """``DELETE /v1/session`` answers 204, and there is nothing to return."""
+        """``DELETE /v1/session`` answers 204, and there is nothing to return.
+
+        And it takes **no token**. That is the document's answer rather than a
+        convenience: identity's ``openapi/v1.yaml`` gives ``deleteSession``
+        ``security: [sessionCookie, bearerToken]`` with no ``requestBody`` and no
+        query parameters, so there is nowhere on the wire for a per-call
+        credential to go. The credential is the client's, attached per request by
+        ``attach_credential``, and the way to change it is ``set_token``.
+
+        The sibling client agrees for the same reason, from the same document:
+        ``cafaye-ts``'s generated ``DeleteSessionData`` is
+        ``{ body?: never; path?: never; query?: never; url: '/v1/session' }``.
+
+        Which matters more than the signature: identity-08 documents that this
+        route answers **403 to a scoped API token**, because a machine credential
+        has no session to end. A signature that accepted a token would have let a
+        caller hand over exactly the credential this route refuses, and the 403
+        would have arrived with no obvious cause.
+        """
         client, _ = sync_client(httpx.Response(204))
-        assert client.identity.delete_session(token="x") is None
+        assert client.identity.delete_session() is None
+        assert not [
+            parameter
+            for parameter in inspect.signature(IdentityService.delete_session).parameters.values()
+            if parameter.name != "self"
+        ]
 
 
 class TestIsCafayeError:
@@ -540,9 +565,43 @@ class TestIsCafayeErrorAcrossTheBoundary:
         reloaded = importlib.reload(errors_module)
         error = reloaded.CafayeProblemError(
             "a problem",
-            {"type": "about:blank", "title": "t", "status": 500},
+            type="about:blank",
+            title="t",
+            status=500,
         )
         assert reloaded.is_cafaye_error(error)
+
+    def test_an_error_from_before_the_reload_is_recognised_after_it(self) -> None:
+        """The case the class docstring actually claims, and the only one that
+        exercises the marker.
+
+        ``importlib.reload`` builds a **new** ``CafayeError`` class object, so an
+        error constructed before the reload is not an instance of the class the
+        reloaded module now names, and ``isinstance`` alone answers ``False``.
+        That is the same failure two installed copies of this package produce in
+        one dependency tree, and it is silent: it looks like a bug in the
+        consumer's own error handling, which is the worst place to go looking for
+        it.
+
+        So the assertion that matters is not that the reloaded module agrees with
+        itself — that one passes on ``isinstance`` alone and proves nothing about
+        the marker. It is that the reloaded module still recognises an error
+        minted by the *old* class, which it can only do through
+        ``__cafaye_error__``.
+        """
+        import importlib
+
+        import cafaye._errors as errors_module
+
+        before = errors_module.CafayeProblemError(
+            "a problem", type="about:blank", title="t", status=500
+        )
+        reloaded = importlib.reload(errors_module)
+
+        # The premise, asserted rather than assumed: the reload really did replace
+        # the class, so `isinstance` really would have said no.
+        assert not isinstance(before, reloaded.CafayeError)
+        assert reloaded.is_cafaye_error(before)
 
     def test_a_plain_exception_is_never_mistaken_for_one(self) -> None:
         values: list[Any] = [None, 1, "x", b"x", [], {}, ValueError("x"), KeyboardInterrupt]

@@ -66,6 +66,24 @@ with a ``socket.gaierror`` in its ``__cause__``.
 :func:`classify_network_failure` is where that knowledge lives, and it is a pure
 function precisely so it can be tested without a socket, a DNS server or a timer.
 
+A CANCELLATION IS NOT A FAILURE AT ALL
+--------------------------------------
+
+:class:`NetworkFailureReason` has no value for a cancellation, and its absence is
+a decision. The obvious place to put one is ``TIMEOUT``, because that is what
+``asyncio`` reports and because it is the reason most retry loops already
+special-case — and it is the most damaging answer available. A handler that
+retries every timeout would have retried a request that was being **torn down**,
+and a runtime shutting down would have kept re-issuing work against a service
+that is already going away.
+
+So the question is asked separately, by :func:`cancellation_in_chain`, which
+returns the caller's own ``CancelledError`` for the client to re-raise untouched.
+Usually there is nothing to find: httpx does not catch ``BaseException``, so a
+cancelled ``await`` propagates at the ``await`` and never becomes an httpx error.
+This is the guard for a transport that wraps one, and it is the one place a
+``CafayeNetworkError`` would be a lie about retryability.
+
 Classification is by **type and errno**, never by message. A message is prose
 written for a human by a library that had the same information and chose to
 flatten it: httpx raises ``ConnectError("All connection attempts failed")`` for
@@ -135,6 +153,7 @@ __all__ = [
     "ErrorKind",
     "FieldError",
     "NetworkFailureReason",
+    "cancellation_in_chain",
     "classify_network_failure",
     "is_cafaye_error",
     "looks_like_problem",
@@ -499,18 +518,11 @@ def classify_network_failure(error: BaseException) -> tuple[NetworkFailureReason
         return NetworkFailureReason.PROTOCOL, errno
 
     for candidate in cause_chain(error):
-        if isinstance(candidate, asyncio.CancelledError):
-            # Not a network fault, and this is why the client re-raises a
-            # cancellation untouched rather than wrapping it: the caller that
-            # cancelled the task — usually a runtime shutting down — has to be
-            # the one that handles it, or a cancelled request becomes a retried
-            # request during shutdown.
-            return NetworkFailureReason.TIMEOUT, errno
         if isinstance(candidate, socket.gaierror):
             return NetworkFailureReason.DNS, errno
         if isinstance(candidate, ssl.SSLError):
             return NetworkFailureReason.TLS, errno
-        if isinstance(candidate, TimeoutError | socket.timeout):
+        if isinstance(candidate, TimeoutError):
             return NetworkFailureReason.TIMEOUT, errno
         if isinstance(
             candidate, ConnectionRefusedError | ConnectionResetError | ConnectionAbortedError
@@ -528,6 +540,38 @@ def classify_network_failure(error: BaseException) -> tuple[NetworkFailureReason
     if isinstance(error, httpx.TransportError):
         return NetworkFailureReason.CONNECTION, errno
     return NetworkFailureReason.UNKNOWN, errno
+
+
+def cancellation_in_chain(error: BaseException) -> asyncio.CancelledError | None:
+    """The ``CancelledError`` in this failure's cause chain, or ``None``.
+
+    A cancellation is not a network failure and is deliberately **not** one of the
+    reasons in :class:`NetworkFailureReason`. It used to be, and it was classified
+    as ``TIMEOUT``, which is the most damaging answer available: a caller whose
+    handler retries every timeout would have retried a request that was being
+    torn down, and a runtime shutting down would have kept re-issuing work
+    against a service that is already going away.
+
+    So it is asked as a separate question with a separate answer. The caller that
+    cancelled the task — a request-scoped timeout, a ``TaskGroup`` unwinding, a
+    worker being rotated — is the only party that knows whether the work should
+    be re-attempted, and the whole point is that this package hands the decision
+    back rather than making it.
+
+    Returns the *object* rather than a bool, so the client can re-raise the
+    caller's own exception untouched. Re-raising the identical object is what
+    keeps ``asyncio``'s cancellation bookkeeping — ``Task.cancelling()`` and
+    ``uncancel()`` — consistent with what the cancelling party did.
+
+    Usually ``None``: httpx does not catch ``BaseException``, so a cancelled
+    ``await`` propagates at the ``await`` and never becomes an httpx error at all.
+    This is the guard for a transport that wraps it, and for any future httpx that
+    does.
+    """
+    for candidate in cause_chain(error):
+        if isinstance(candidate, asyncio.CancelledError):
+            return candidate
+    return None
 
 
 def cause_chain(error: BaseException, limit: int = 8) -> list[BaseException]:

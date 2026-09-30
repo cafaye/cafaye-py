@@ -89,6 +89,7 @@ from ._errors import (
     CafayeConfigurationError,
     CafayeError,
     NetworkFailureReason,
+    cancellation_in_chain,
     classify_network_failure,
     looks_like_problem,
     network_error_from,
@@ -365,8 +366,44 @@ class _BaseCafaye:
             secrets=secrets,
         )
 
-    def _network_error(self, error: BaseException, operation: str) -> tuple[CafayeError, BaseException]:
-        """Turn "no response arrived" into a typed exception and a safe cause.
+    def _failure(
+        self, error: BaseException, operation: str
+    ) -> tuple[BaseException, BaseException | None]:
+        """The one place a transport failure becomes something to throw.
+
+        Two answers, and which one applies is the whole design of this method:
+
+        - A **cancellation** is the caller's own ``CancelledError``, returned as
+          the identical object with no cause and no cafaye type. It is not
+          classified, because there is nothing to classify: the party that
+          cancelled the task is the only one that knows whether to re-attempt it,
+          and a ``CafayeTimeoutError`` here would invite a retry loop to re-issue
+          work during shutdown. Re-raising the identical object is also what
+          keeps ``asyncio``'s cancellation bookkeeping — ``Task.cancelling()``
+          and ``uncancel()`` — consistent with what the cancelling party did.
+        - Anything else is a :class:`CafayeNetworkError` from
+          :meth:`_network_error`, with a redacted cause.
+
+        Returns a **pair** rather than raising, and that is the shape of a bug
+        this module had and the tests caught. Raising from inside the ``except``
+        block left the original ``httpx.ConnectError`` reachable as ``__context__``
+        on the new one — a fully populated object with the credential in its
+        ``args``, which ``traceback`` renders in full for any logger configured
+        with ``exc_info`` and which ``pytest`` renders for every assertion
+        failure. Redacting ``__cause__`` was not enough; the whole context chain
+        has to be gone. So the caller raises this from **outside** the handler,
+        where there is no active exception to inherit.
+        """
+        cancelled = cancellation_in_chain(error)
+        if cancelled is not None:
+            return cancelled, None
+        return self._network_error(error, operation)
+
+    def _network_error(
+        self, error: BaseException, operation: str
+    ) -> tuple[CafayeError, BaseException | None]:
+        """Turn a failure that produced no response into a typed exception and a
+        safe cause.
 
         The message is assembled here and redacted here, because it is the one
         string in this package built out of a platform error's own text — and a
@@ -375,15 +412,8 @@ class _BaseCafaye:
         up containing somebody's credential, because a proxy or a service that
         echoes one back is the ordinary accident this package exists to survive.
 
-        Returns a **pair** rather than an exception, and that is the shape of a bug
-        this module had and the tests caught. Raising the error from inside the
-        ``except`` block left the original ``httpx.ConnectError`` reachable as
-        ``__context__`` on the new one — a fully populated object with the
-        credential in its ``args``, which ``traceback`` renders in full for any
-        logger configured with ``exc_info`` and which ``pytest`` renders for every
-        assertion failure. Redacting ``__cause__`` was not enough; the whole
-        context chain has to be gone. So the caller raises this from **outside**
-        the handler, where there is no active exception to inherit.
+        The reason this returns rather than raises is :meth:`_failure`'s, and the
+        ``__context__`` paragraph there is the reason for the pair.
         """
         reason, errno = classify_network_failure(error)
         secrets = [self._token] if self._token is not None else []
@@ -571,14 +601,17 @@ class Cafaye(_BaseCafaye):
             )
             response = self._client.send(request)
         except Exception as exc:
-            # `CancelledError` is a `BaseException`, so it is not caught here and
-            # a cancelled coroutine stays cancelled — which is what lets a caller
-            # tearing down a task not turn it into a retried request.
-            failure = self._network_error(exc, pending.url)
+            # `CancelledError` is a `BaseException`, so a cancellation raised at
+            # the `await` is not caught here either and a cancelled coroutine
+            # stays cancelled. `_failure` handles the other case: a transport
+            # that wrapped one, which is what the `cancellation_in_chain` guard is
+            # for.
+            failure = self._failure(exc, pending.url)
         else:
             return _drain(exchange, response)
-        # Outside the handler on purpose: see `_network_error`. Raising inside the
-        # `except` would leave the original exception reachable as `__context__`.
+        # Outside the handler on purpose: see `_failure`. Raising inside the
+        # `except` would leave the original exception reachable as `__context__`,
+        # with the credential in its `args`.
         raise failure[0] from failure[1]
 
     def close(self) -> None:
@@ -660,9 +693,11 @@ class AsyncCafaye(_BaseCafaye):
             )
             response = await self._client.send(request)
         except Exception as exc:
-            failure = self._network_error(exc, pending.url)
+            failure = self._failure(exc, pending.url)
         else:
             return _drain(exchange, response)
+        # Outside the handler, for the same reason as the sync face, and the
+        # reason is in `_failure`.
         raise failure[0] from failure[1]
 
     async def aclose(self) -> None:

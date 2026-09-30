@@ -53,18 +53,40 @@ def problem_body(
 
 Handler = Callable[[httpx.Request], httpx.Response]
 
+#: What a test may hand to ``sync_client``/``async_client`` instead of a handler.
+#:
+#: Three forms, and all three are used by the suite:
+#:
+#: - an ``httpx.Response``, returned as the answer;
+#: - a callable, called with the request, so a test can vary by request;
+#: - a **``BaseException``, which the transport raises**.
+#:
+#: The third is not a convenience. ``httpx.MockTransport`` type-checks whatever
+#: its handler returns and raises ``TypeError("Cannot use an async handler in a
+#: sync Client")`` for anything that is not a ``Response`` — so a handler that
+#: *returned* an exception produced a ``TypeError`` rather than the transport
+#: fault under test, and every network-failure test classified it as
+#: ``reason="unknown"`` instead of the shape it was asserting about. Raising is
+#: what a real transport does, and it is the only way these tests exercise
+#: ``classify_network_failure`` at all.
+Stub = httpx.Response | Handler | BaseException
 
-def responding_with(
-    response: httpx.Response | Callable[[httpx.Request], httpx.Response],
-) -> Handler:
-    """A handler returning ``response``, or calling it if it is a callable."""
-    if callable(response):  # pragma: no cover - defensive, both forms are used
-        return response
-    return lambda _request: response
+
+def responding_with(stub: Stub) -> Handler:
+    """Turn any of the three forms into the one thing httpx accepts: a handler."""
+    if isinstance(stub, BaseException):
+
+        def raise_it(_request: httpx.Request) -> httpx.Response:
+            raise stub
+
+        return raise_it
+    if callable(stub):
+        return stub
+    return lambda _request: stub
 
 
 def sync_client(
-    response: httpx.Response | Handler,
+    response: Stub,
     *,
     token: str | None = None,
     base_url: str = BASE,
@@ -86,7 +108,7 @@ def sync_client(
 
 
 def async_client(
-    response: httpx.Response | Handler,
+    response: Stub,
     *,
     token: str | None = None,
     base_url: str = BASE,
