@@ -21,6 +21,7 @@ one that matters, because a parameter that never reaches the wire scopes nothing
 The count, which a reader can check against ``IDENTITY_OPERATIONS`` directly:
 
     8  account-scoped entry points  (path contains ``/v1/accounts/{account_id}``)
+    5  ... across 5 distinct paths; three of those carry two operations each
     8  ... each on 2 faces        = 16 account-scoped call sites
     2  credential-scoped entry points (tenant named by the token, not the path)
     0  update verbs — see below
@@ -81,7 +82,7 @@ from __future__ import annotations
 
 import json
 import re
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, fields
 from typing import Any, Callable
 
 import httpx
@@ -131,6 +132,12 @@ class EntryPoint:
     #: The second entry point ``name`` reaches, when one method is two. ``None`` for
     #: the seven that are one-to-one.
     also_reaches: str | None = None
+    #: Whether this entry point returns a model. The three deletes do not —
+    #: ``DELETE`` answers 204 and there is nothing to decode. Stated rather than
+    #: derived from ``kind`` because "delete implies void" is a coincidence of this
+    #: table, not a rule: a future ``PATCH`` returning a row would break a
+    #: derivation and not this field.
+    returns_model: bool = True
 
     def render(self, account_id: str) -> str:
         """The path this entry point must put on the wire for ``account_id``.
@@ -209,6 +216,7 @@ ACCOUNT_SCOPED: tuple[EntryPoint, ...] = (
         "DELETE",
         "/v1/accounts/{account_id}/oidc-clients/{client_id}",
         {"client_id": SHARED_CLIENT_ID},
+        returns_model=False,
     ),
     EntryPoint(
         "mint_api_key",
@@ -236,6 +244,7 @@ ACCOUNT_SCOPED: tuple[EntryPoint, ...] = (
         "DELETE",
         "/v1/accounts/{account_id}/api-keys/{key_id}",
         {"key_id": SHARED_KEY_ID},
+        returns_model=False,
     ),
     EntryPoint(
         "revoke_api_key",
@@ -244,6 +253,7 @@ ACCOUNT_SCOPED: tuple[EntryPoint, ...] = (
         "/v1/accounts/{account_id}/api-keys/{key_id}/revoke",
         {"key_id": SHARED_KEY_ID, "reason": "rotated"},
         also_reaches="DELETE /v1/accounts/{account_id}/api-keys/{key_id}",
+        returns_model=False,
     ),
 )
 
@@ -847,3 +857,554 @@ class TestAForbiddenTheServiceSentIsNotHidden:
         with pytest.raises(CafayeNotFoundError) as caught:
             run(namespace.delete_session()) if face == "async" else namespace.delete_session()
         assert type(caught.value) is CafayeNotFoundError
+
+
+# ---------------------------------------------------------------------------
+# 7. THE ENUMERATION CANNOT GO STALE  (the walk that keeps §1 honest)
+# ---------------------------------------------------------------------------
+
+
+def _identity_source() -> Any:
+    """The parsed AST of ``_services/identity.py``.
+
+    From the file rather than from the installed module, because the claim is
+    about the **source**: an operation can be added to the table, wired up, and
+    documented, and only the file says so. ``test_credential_leak.py`` resolves
+    the package the same way and for the same reason.
+    """
+    import ast
+    from pathlib import Path
+
+    source = Path(__file__).resolve().parent.parent / "src" / "cafaye" / "_services" / "identity.py"
+    return ast.parse(source.read_text(encoding="utf-8"), filename=str(source))
+
+
+class TestTheEnumerationIsComplete:
+    """Every account-scoped path in the source is in the enumeration, and vice versa.
+
+    Without this, the counts in the module docstring and in the report are a
+    snapshot: a packet that adds a twenty-first operation, or extends an existing
+    path with a second account-scoped resource, would leave them wrong and the
+    suite green. The counts are the deliverable, so the counts get a walk.
+
+    Both directions, because each catches a different mistake. Source → table
+    catches a new operation nobody negative-tested. Table → source catches an
+    entry point that does not exist, which is a test that passes without testing
+    anything.
+    """
+
+    @staticmethod
+    def _paths_in_source() -> set[str]:
+        import ast
+
+        found: set[str] = set()
+        for node in ast.walk(_identity_source()):
+            if isinstance(node, ast.Constant) and isinstance(node.value, str):
+                if node.value.startswith("/v1/accounts/"):
+                    found.add(node.value)
+        return found
+
+    def test_every_account_scoped_path_in_the_source_is_enumerated(self) -> None:
+        enumerated = {entry.path for entry in ACCOUNT_SCOPED}
+        assert self._paths_in_source() == enumerated
+
+    def test_the_source_has_exactly_five_account_scoped_paths(self) -> None:
+        """**Five paths, eight entry points.** Stated separately from the set
+        comparison so a change in either number names itself.
+
+        The arithmetic, which a reader can check against the table::
+
+            /v1/accounts/{account_id}/oidc-clients                 POST + GET   2
+            /v1/accounts/{account_id}/oidc-clients/{client_id}     GET + DELETE 2
+            /v1/accounts/{account_id}/api-keys                    POST + GET   2
+            /v1/accounts/{account_id}/api-keys/{key_id}           DELETE       1
+            /v1/accounts/{account_id}/api-keys/{key_id}/revoke   POST         1
+                                                                    --------
+                                                                     5  paths
+                                                                     8  entry points
+
+        Three paths carry two operations each — a create and a list on the two
+        collections, a read and a delete on the OIDC item — which is exactly why
+        a path-keyed count would say 5 and a reader expecting 8 would have to
+        work out why.
+        """
+        assert len(self._paths_in_source()) == 5
+        assert len(ACCOUNT_SCOPED) == 8
+
+    @pytest.mark.parametrize("face_name", ["sync", "async"], ids=["sync", "async"])
+    def test_every_method_that_takes_an_account_id_is_enumerated(
+        self, face_name: str
+    ) -> None:
+        """The other direction, and keyed on the **signature** rather than a list.
+
+        Stating the thirteen public methods that are not account-scoped would be
+        a snapshot of the other half of the service, and a snapshot of the half
+        this packet is not about is a list that gets edited under time pressure.
+        Keyed on ``account_id`` in the signature it is the property itself: any
+        method a caller can aim at a tenant is enumerated, on both faces.
+
+        ``revoke_api_key`` is why the faces have to be checked separately. One
+        Python method, two wire shapes — so a walk counting method names says 7
+        where the enumeration says 8, and the second shape would go untested
+        unless it were enumerated explicitly. It is.
+        """
+        import inspect
+
+        from cafaye._services.identity import AsyncIdentityService, IdentityService
+
+        service = IdentityService if face_name == "sync" else AsyncIdentityService
+        taking = {
+            name
+            for name, member in vars(service).items()
+            if not name.startswith("_")
+            and callable(member)
+            and "account_id" in inspect.signature(member).parameters
+        }
+        assert taking == {entry.name for entry in ACCOUNT_SCOPED}
+        assert len(taking) == 7, "seven methods, eight entry points — see §1"
+        assert len(ACCOUNT_SCOPED) == 8
+
+    def test_the_table_itself_declares_seven_account_scoped_operations(self) -> None:
+        """The seventh count, from the table, agreeing with the enumeration.
+
+        7 declared + 1 undeclared (``…/revoke``) = 8. If a future packet adds an
+        account-scoped route to identity's document and to this table, the
+        enumeration and this number both move, and this test is what makes them
+        have to move together.
+        """
+        from cafaye._services.identity import IDENTITY_OPERATIONS as table
+
+        declared = [op for op in table.values() if op.path.startswith("/v1/accounts/")]
+        assert len(declared) == 7
+        assert {op.path for op in declared} == {entry.path for entry in ACCOUNT_SCOPED
+                                                if entry.also_reaches is None}
+
+
+class TestNoAuthorisationGateInTheSources:
+    """The FINDING check, as a walk rather than a reading.
+
+    Three ways a 403 could get into this client without anybody deciding to put
+    it there, and each is a place a well-meaning edit would land:
+
+    - a literal 403 handled per-operation in a service method;
+    - a status code mapped to a class in a place other than ``_errors``' table,
+      which is the single place the mapping is allowed to live;
+    - a per-operation branch on an ``account_id``, which is how a "helpfully
+      different" answer for another tenant's row gets written.
+
+    None of them is present. That is worth a test, because the day one is added it
+    is an enumeration oracle in a package whose whole selling point is that it
+    holds one invariant.
+    """
+
+    def test_no_service_file_handles_a_403(self) -> None:
+        import ast
+
+        for node in ast.walk(_identity_source()):
+            if isinstance(node, ast.Constant) and node.value in {403, "403"}:
+                raise AssertionError(
+                    f"_services/identity.py mentions 403 at line {node.lineno}; a 403 "
+                    "must come from the service and be mapped once, in _errors"
+                )
+
+    def test_the_only_status_to_class_mapping_is_the_one_in_errors(self) -> None:
+        from cafaye import _errors
+
+        assert set(_errors._STATUS_CLASSES) == {401, 403, 404, 409, 422, 429}
+        assert _errors._STATUS_CLASSES[403].__name__ == "CafayeForbiddenError"
+        assert _errors._STATUS_CLASSES[404].__name__ == "CafayeNotFoundError"
+
+    def test_a_403_and_a_404_are_unrelated_types(self) -> None:
+        """The property the whole rule rests on, asserted so it cannot rot.
+
+        If ``CafayeForbiddenError`` ever became a base of ``CafayeNotFoundError``,
+        ``except CafayeForbiddenError`` would start catching absences, and every
+        negative test above would keep passing while the type stopped meaning
+        anything. Sibling, not ancestor.
+        """
+        from cafaye import CafayeForbiddenError, CafayeNotFoundError
+
+        assert not issubclass(CafayeNotFoundError, CafayeForbiddenError)
+        assert not issubclass(CafayeForbiddenError, CafayeNotFoundError)
+        assert CafayeNotFoundError.__mro__[1].__name__ == "CafayeProblemError"
+        assert CafayeForbiddenError.__mro__[1].__name__ == "CafayeProblemError"
+
+
+# ---------------------------------------------------------------------------
+# 8. THE CREDENTIAL-SCOPED ENTRY POINTS
+# ---------------------------------------------------------------------------
+
+
+class TestTheCallerCannotAskForAnotherAccountsUser:
+    """The whole point in one assertion: there is nothing to ask for.
+
+    ``GET /v1/me`` has no ``{account_id}`` in its path and no tenant argument in
+    its signature, so a caller cannot ask this client for another account's user.
+    Enumerated in ``CREDENTIAL_SCOPED`` and asserted here so "the client cannot
+    *request* a cross-tenant read" is a measurement rather than an assumption.
+
+    Not parametrized over the two faces, because it is about the signatures rather
+    than the traffic — and it checks **both** signatures, so parametrising would
+    run the same assertion twice and call that coverage.
+    """
+
+    def test_get_current_user_takes_no_tenant_parameter(self) -> None:
+        import inspect
+
+        from cafaye._services.identity import AsyncIdentityService, IdentityService
+
+        for service in (IdentityService, AsyncIdentityService):
+            parameters = inspect.signature(service.get_current_user).parameters
+            assert list(parameters) == ["self"], service.__name__
+
+    def test_the_only_operations_taking_an_account_id_are_the_eight(self) -> None:
+        """The complement, and the count the report quotes from the other side.
+
+        A signature that grew an ``account_id`` would be a new way for a caller to
+        aim this client at a tenant, and it would have to appear in
+        ``ACCOUNT_SCOPED`` to be tested. Four of the twenty methods take one and
+        four do not, and the four that take one are the four distinct operations
+        behind the eight entry points.
+        """
+        import inspect
+
+        from cafaye._services.identity import IdentityService
+
+        taking = sorted(
+            name
+            for name, member in vars(IdentityService).items()
+            if not name.startswith("_")
+            and callable(member)
+            and "account_id" in inspect.signature(member).parameters
+        )
+        assert taking == [
+            "get_oidc_client",
+            "list_api_keys",
+            "list_oidc_clients",
+            "mint_api_key",
+            "register_oidc_client",
+            "revoke_api_key",
+            "revoke_oidc_client",
+        ]
+
+
+@pytest.mark.parametrize("face", FACES, ids=list(FACES))
+class TestTheClientHoldsNoTenantState:
+    """Ten tenant-touching entry points, and eight of them are path-scoped.
+
+    The other two get their tenant from the credential, and the client's part of
+    that is a single fact: **the token is the only tenant state there is.** These
+    hold it, because a client that cached "which account did that token belong
+    to" would be a cross-tenant leak with a shelf life — it would keep answering
+    for the account that token used to belong to, after ``set_token`` moved it.
+    """
+
+    def test_get_current_user_sends_no_account_id_anywhere(self, face: str) -> None:
+        namespace, sent = _make_client(face, _success_handler(CREDENTIAL_SCOPED[0]))
+        if face == "async":
+            run(namespace.get_current_user())
+        else:
+            namespace.get_current_user()
+        request = sent[0]
+        assert request.url.path == "/v1/me"
+        assert request.url.query == b""
+        assert ACCOUNT_A not in request.url.path
+        assert ACCOUNT_B not in request.url.path
+
+    def test_introspect_puts_the_credential_in_the_body_and_nowhere_else(self, face: str) -> None:
+        """The token is the tenant, so where the token goes **is** the scoping.
+
+        In the body, because ``POST /v1/introspections`` takes the credential as
+        its subject rather than as the caller's own authentication. Not in the
+        path, not in the query, and not in the ``Authorization`` header: an
+        introspected key in a query string is a key in every access log between
+        the client and the service.
+        """
+        namespace, sent = _make_client(face, _success_handler(CREDENTIAL_SCOPED[1]))
+        if face == "async":
+            run(namespace.introspect_api_key(token="TESTONLY-not-a-real-key"))
+        else:
+            namespace.introspect_api_key(token="TESTONLY-not-a-real-key")
+        request = sent[0]
+        assert request.url.path == "/v1/introspections"
+        assert request.url.query == b""
+        assert "TESTONLY-not-a-real-key" not in request.url.path
+        assert "TESTONLY-not-a-real-key" not in request.url.query.decode()
+        assert "TESTONLY-not-a-real-key" not in request.headers.get("authorization", "")
+        assert json.loads(request.read())["token"] == "TESTONLY-not-a-real-key"
+
+    def test_introspect_sends_no_account_id(self, face: str) -> None:
+        """The result names an account; the request does not.
+
+        ``Introspection.account_id`` is the answer. If the request also carried
+        one, the client would be asserting a tenancy the credential decides, and a
+        mismatch would be resolved by whichever the service preferred.
+        """
+        namespace, sent = _make_client(face, _success_handler(CREDENTIAL_SCOPED[1]))
+        if face == "async":
+            run(namespace.introspect_api_key(token="TESTONLY-not-a-real-key"))
+        else:
+            namespace.introspect_api_key(token="TESTONLY-not-a-real-key")
+        assert "account_id" not in json.loads(sent[0].read())
+
+    def test_two_clients_with_two_tokens_get_two_different_users(self, face: str) -> None:
+        """Tenant state is per-client, and there is none of it beyond the token.
+
+        Account A's client and account B's client, one process, one transport.
+        If anything were shared — a module-level current user, a class attribute
+        holding the last decoded body — the second assertion fails and the bug is
+        a cross-tenant read in the most innocent-looking code there is.
+        """
+        def answering(account_id: str, user_id: str) -> Callable[[httpx.Request], httpx.Response]:
+            return lambda _request: httpx.Response(
+                200, json={"id": user_id, "email": f"{account_id}@b.test"}
+            )
+
+        a_ns, _ = _make_client(
+            face, answering(ACCOUNT_A, "usr_a"), token="TESTONLY-a"
+        )
+        b_ns, _ = _make_client(
+            face, answering(ACCOUNT_B, "usr_b"), token="TESTONLY-b"
+        )
+        call_a, call_b = a_ns.get_current_user, b_ns.get_current_user
+        if face == "async":
+            first, second = run(call_a()), run(call_b())
+        else:
+            first, second = call_a(), call_b()
+        assert first.id == "usr_a"
+        assert second.id == "usr_b"
+        assert first is not second
+
+    def test_set_token_moves_the_tenant_and_nothing_else_is_remembered(self, face: str) -> None:
+        """The shelf-life case, and the one that would survive a restart test.
+
+        One client, one token, two accounts: the second answer must come from the
+        second request. A client that cached the decoded user — or the account the
+        token belonged to — keeps answering for the first account, and the failure
+        appears only in production, on a long-lived worker, after a token rotation.
+        """
+        # The double answers by CREDENTIAL, not by a fixed body: a handler that
+        # returned the same user every time would make this test pass on a client
+        # that had cached the first answer and never sent the second request. What
+        # the double reads is the `Authorization` header, which is the only place
+        # the tenant lives.
+        def answering(request: httpx.Request) -> httpx.Response:
+            authorization = request.headers.get("authorization", "")
+            user_id = "usr_b" if authorization.endswith("TESTONLY-b") else "usr_a"
+            return httpx.Response(200, json={"id": user_id, "email": f"{user_id}@b.test"})
+
+        namespace, sent = _make_client(face, answering, token="TESTONLY-a")
+        read = namespace.get_current_user
+        if face == "async":
+            assert run(read()).id == "usr_a"
+            namespace._client.set_token("TESTONLY-b")
+            assert run(read()).id == "usr_b"
+        else:
+            assert read().id == "usr_a"
+            namespace._client.set_token("TESTONLY-b")
+            assert read().id == "usr_b"
+        assert len(sent) == 2, "the second token's call must reach the wire"
+
+
+# ---------------------------------------------------------------------------
+# 9. THE MODELS DO NOT MERGE TENANTS
+# ---------------------------------------------------------------------------
+
+
+@ALL_ENTRIES
+@BOTH_FACES
+class TestTheModelsDoNotMergeTenants:
+    """A response for account B must not be able to look like account A's.
+
+    Every id in this file is the same on both sides, on purpose. So the *only*
+    thing separating the two answers is the account the service named in the body
+    — and if a model ever collapsed that, or a decode ever reused an object, the
+    caller would be holding account B's row while believing it asked about its
+    own. There is no 403 and no error in that failure: it is a successful read of
+    the wrong tenant.
+    """
+
+    def test_two_tenants_two_distinct_objects(self, entry: EntryPoint, face: str) -> None:
+        """Two calls, two decodes, two objects — for the six that decode at all.
+
+        The three deletes return ``None`` because a 204 carries nothing, and
+        ``None is None`` is true, so asserting distinctness there would assert
+        nothing. Those entry points have no model to merge, and the request
+        assertions in §2 are what carry them.
+        """
+        first = _invoke(face, entry, ACCOUNT_A, _success_handler(entry))
+        second = _invoke(face, entry, ACCOUNT_B, _success_handler(entry))
+        if not entry.returns_model:
+            assert first is None and second is None, entry.name
+            return
+        assert first is not second, entry.name
+        assert first == second, "same body, so equal — but two objects, not one"
+
+    def test_the_second_answer_is_the_second_response(
+        self, entry: EntryPoint, face: str
+    ) -> None:
+        """The load-bearing one, and the only one that can see a cache.
+
+        The first call answers with a body stamped ``ACCOUNT_A``; the second, for
+        ``ACCOUNT_B``, answers with a body stamped ``ACCOUNT_B``. If anything
+        memoised on the resource id, the second call would hand back the first
+        body — equal to the first answer, wrong for the second tenant, and
+        invisible to every other test in this file.
+        """
+        def answering(account_id: str) -> Callable[[httpx.Request], httpx.Response]:
+            if entry.kind == "list":
+                return lambda _request: httpx.Response(
+                    200,
+                    json={
+                        "data": [_api_key_body(account_id, SHARED_KEY_ID)],
+                        "page": {"has_more": False, "next_cursor": None},
+                    },
+                )
+            if entry.kind == "read":
+                return lambda _request: httpx.Response(
+                    200, json=_oidc_client_body(account_id, SHARED_CLIENT_ID)
+                )
+            if entry.name == "register_oidc_client":
+                return lambda _request: httpx.Response(
+                    201,
+                    json={
+                        **_oidc_client_body(account_id, SHARED_CLIENT_ID),
+                        "client_secret": "TESTONLY-not-a-real-secret",
+                    },
+                )
+            if entry.name == "mint_api_key":
+                return lambda _request: httpx.Response(
+                    201,
+                    json={
+                        **_api_key_body(account_id, SHARED_KEY_ID),
+                        "token": "cafaye_TESTONLY",
+                    },
+                )
+            # The three deletes: a 204, and nothing to decode.
+            return lambda _request: httpx.Response(204)
+
+        a_answer = _invoke(face, entry, ACCOUNT_A, answering(ACCOUNT_A))
+        b_answer = _invoke(face, entry, ACCOUNT_B, answering(ACCOUNT_B))
+
+        if entry.kind == "list":
+            assert a_answer.data[0]["account_id"] == ACCOUNT_A
+            assert b_answer.data[0]["account_id"] == ACCOUNT_B
+        elif entry.name == "get_oidc_client":
+            assert a_answer.name == f"client of {ACCOUNT_A}"
+            assert b_answer.name == f"client of {ACCOUNT_B}"
+        elif entry.name == "mint_api_key":
+            assert a_answer.account_id == ACCOUNT_A
+            assert b_answer.account_id == ACCOUNT_B
+        elif entry.name == "register_oidc_client":
+            assert a_answer.name == f"client of {ACCOUNT_A}"
+            assert b_answer.name == f"client of {ACCOUNT_B}"
+        else:
+            # Nothing to decode, which is exactly why the *request* assertions in
+            # §2 carry the weight for the three deletes: a void answer cannot hold
+            # the wrong tenant's data, so there is nothing here for it to hold.
+            assert a_answer is None and b_answer is None
+
+
+class TestACredentialCannotBeCarriedByAListing:
+    def test_a_credential_cannot_be_carried_by_a_listing(self) -> None:
+        """``ApiKey`` has no ``token`` field, and this is the reason why.
+
+        A listing is the shape most likely to end up in a log line, a support
+        ticket or a metrics label, and a token in a listing is a token in all
+        three. The model cannot hold one — so this asserts the absence of the
+        field rather than trusting the docstring, and then asserts that the
+        *create* model, which does hold one, is the only place it appears.
+
+        Not parametrized over the entry points: a ``skip`` for the seven that are
+        not ``list_api_keys`` would put the word ``skipped`` on the summary line,
+        and ``gate.yml``'s ``no-skip`` proof has a negative lookahead on exactly
+        that word. A suite that skips is a suite that is quietly smaller, and
+        this repository's gate says so out loud rather than adding to it.
+        """
+        from cafaye._models import ApiKey, IssuedApiKey
+
+        assert not hasattr(ApiKey, "token")
+        assert hasattr(IssuedApiKey, "token")
+        assert "token" not in {field.name for field in fields(ApiKey)}
+        assert "token" in {field.name for field in fields(IssuedApiKey)}
+
+
+@ALL_ENTRIES
+@BOTH_FACES
+class TestAListingBelongsToTheAccountItWasAskedAbout:
+    """The one entry point that hands back rows, on its own.
+
+    A page is the only account-scoped answer that carries **several** tenants'
+    worth of shape — an array of dicts the caller is free to walk. So it gets its
+    own class rather than living inside ``TestTheModelsDoNotMergeTenants``, where
+    it would be one assertion among three and the seven entry points that return
+    no rows would each need a skip to sit beside it.
+    """
+
+    def test_a_listing_is_scoped_to_the_account_that_asked(
+        self, entry: EntryPoint, face: str
+    ) -> None:
+        """A page's rows belong to the account the page was asked for.
+
+        Both list entry points, one assertion, because a page is a raw
+        ``_Page`` of dicts rather than a decoded model: nothing in the type
+        stops a row for the wrong account from arriving in it, so the rows have
+        to be stamped and checked by hand. ``account_id`` is added to the OIDC
+        row here for exactly that reason — a real service includes it, and the
+        field is what a reader of a page would filter on.
+        """
+        if entry.kind != "list":
+            # Not a `skip`: a plain early return with a stated reason.
+            # `gate.yml`'s `no-skip` proof has a negative lookahead on the word
+            # `skipped`, so a skipped test is a smaller suite with a green exit
+            # code. An early return leaves no trace on the summary line and still
+            # counts as passing — which is the honest description of "this entry
+            # point returns no rows, so there is nothing to scope".
+            assert entry.kind in {"read", "create", "delete"}, entry.name
+            return
+
+        def row(account_id: str) -> dict[str, Any]:
+            if entry.name == "list_api_keys":
+                return _api_key_body(account_id, SHARED_KEY_ID)
+            return {**_oidc_client_body(account_id, SHARED_CLIENT_ID), "account_id": account_id}
+
+        def answering(account_id: str) -> Callable[[httpx.Request], httpx.Response]:
+            # Not `{**_empty_page()}`: that carries its own `data: []` and would
+            # overwrite the row this test is about. Spelled out, because a page
+            # envelope with a silently-clobbered `data` is a hard thing to read.
+            return lambda _request: httpx.Response(
+                200,
+                json={
+                    "data": [row(account_id)],
+                    "page": {"has_more": False, "next_cursor": None},
+                },
+            )
+
+        first = _invoke(face, entry, ACCOUNT_A, answering(ACCOUNT_A))
+        second = _invoke(face, entry, ACCOUNT_B, answering(ACCOUNT_B))
+        assert first.data[0]["account_id"] == ACCOUNT_A
+        assert second.data[0]["account_id"] == ACCOUNT_B
+        assert first is not second
+        assert first.data[0] != second.data[0]
+        assert "token" not in first.data[0]
+        assert first.has_more is False
+        assert first.next_cursor is None
+
+    def test_a_listing_for_an_account_with_no_rows_is_empty_and_not_absent(
+        self, entry: EntryPoint, face: str
+    ) -> None:
+        """The other half of the negative test: the answer for "nothing here".
+
+        ``data: []`` with ``has_more: false``, rather than a missing ``data`` key
+        and rather than a 403. An empty page and a 403 are both ways a client
+        learns something it should not — one about the caller's rights, one about
+        the size of somebody else's account.
+        """
+        if entry.kind != "list":
+            assert entry.kind in {"read", "create", "delete"}, entry.name
+            return
+        page = _invoke(face, entry, ACCOUNT_B, lambda _request: httpx.Response(200, json=_empty_page()))
+        assert page.data == ()
+        assert page.next_cursor is None
+        assert page.has_more is False
+        assert len(page) == 2, "the envelope is still there — absence, not a gap"
