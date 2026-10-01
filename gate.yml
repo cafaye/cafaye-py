@@ -183,12 +183,22 @@ gate:
     #   * exactly one capture group, because `minimum` is read from group 1 and a
     #     second group is `gate.proof-invalid`.
     #
-    # 580 and not 586 is a deliberate six-test margin, on muse's reasoning: a
-    # floor at exactly today's count is a floor that has to be edited before
-    # anything can be added, and a floor people edit under time pressure is a
-    # floor that gets lowered. Six below the measured 586 is still a real
-    # detector — a suite that quietly lost seven tests is `gate.floor`, which is
-    # a failure — and adding a test costs nothing.
+    # A margin below the measured count, on muse's reasoning: a floor at exactly
+    # today's count is a floor that has to be edited before anything can be added,
+    # and a floor people edit under time pressure is a floor that gets lowered.
+    #
+    # THE MARGIN HAS GROWN, and that is said here rather than left for a reader to
+    # work out. This number was 580 against a measured 586 — a deliberate six, and
+    # it was correct then. cafaye-py-11 added 362 tenant-isolation tests, so the
+    # measured count is 948 and 580 is now **368 below it**, which is no longer a
+    # margin but a floor that would sit 368 tests under the suite.
+    #
+    # It was NOT raised, and the reason matters more than the number: `suite` is
+    # the *permissive* half of the pair. `no-skip` below carries the exact count,
+    # so a deletion is still detected to the test. Raising this one to 948 as well
+    # would buy nothing and would put two floors at the same number, which is the
+    # "a reader who has to work out which of the two floors does the work" case the
+    # `no-skip` comment below warns about. Left where it is, with the drift named.
     - id: suite
       match: '^=+ ([0-9]+) passed'
       minimum: 580
@@ -202,13 +212,24 @@ gate:
     # green exit code and a smaller suite, and a CI job that silently skips the
     # hard part is worse than no CI.
     #
-    # 586 exactly, and not a rounded number, because cafaye-py's unit tier has no
-    # external dependency to be absent: there is no `skipif`, no
-    # `importorskip` and no environment variable anywhere under `tests/`, so 586
-    # is the whole suite and the difference between 586 and 585 is one test that
-    # did not run. It cannot be satisfied by a partial run. It is also a ratchet
-    # in the safe direction: adding tests leaves it green, and deleting one takes
-    # it under.
+    # The exact count, and not a rounded number, because cafaye-py's unit tier has
+    # no external dependency to be absent: there is no `skipif`, no
+    # `importorskip` and no environment variable anywhere under `tests/`, so the
+    # number is the whole suite and the difference between it and one less is one
+    # test that did not run. It cannot be satisfied by a partial run.
+    #
+    # RAISED 586 -> 948 by cafaye-py-11, and this is a RAISE, which is the
+    # direction that matters. The floor is the only thing standing between a
+    # silently-shrunk suite and a green badge, and a packet that adds 362 tests
+    # without moving it has loosened the gate by 362 without anybody deciding to.
+    # `AGENTS.md`'s rule is "when you delete a test, lower nothing and raise
+    # nothing — read the failure"; nothing was deleted, and a deletion from here
+    # takes 948 to 947 and trips `gate.floor`, which is the mechanism working.
+    #
+    # The count it rests on is not a guess. `./bin/prime` on this worktree at
+    # `cefc08c` printed `= 948 passed in 2.19s =` with `0 skipped`, and
+    # `REPORT-cafaye-py-11-isolation.md` records the run. The two claims are
+    # checkable against each other, which is the whole point of naming a number.
     #
     # Read as a pair, and honestly: whenever a run skips, `no-skip` subsumes
     # `suite` — it demands a strictly higher count AND the absence of the word.
@@ -219,7 +240,7 @@ gate:
     # the wrong one.
     - id: no-skip
       match: '^=+ (?!.*skipped)([0-9]+) passed'
-      minimum: 586
+      minimum: 948
     # `bin/prime`'s own last word, printed only after all six steps returned
     # zero. Its job is to separate "the script decided green" from "a process
     # exited zero", which is the distinction this entire format exists for. A

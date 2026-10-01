@@ -9,23 +9,84 @@ this project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+**`tests/test_tenant_isolation.py` — 362 cross-tenant negative tests, and the
+enumeration they are negative about.** D18 measured cafaye-py at **zero**
+cross-tenant negative tests. This is that number, and it follows darkroom-09's
+pattern: enumerate every account-scoped entry point, negative-test each one, make
+the scoping load-bearing.
+
+cafaye-py is a **client SDK**, not a service — there is no route table and no
+database in this repository, so the account-scoped surface here is the *service
+methods* and the enumeration says so rather than inventing a server to test:
+
+| | count | entry points |
+|---|---|---|
+| **account-scoped** | **8** | across **5** distinct paths |
+| … per face (`IdentityService` + `AsyncIdentityService`) | **16** | call sites |
+| read | 1 | `get_oidc_client` |
+| list | 2 | `list_oidc_clients`, `list_api_keys` |
+| create | 2 | `register_oidc_client`, `mint_api_key` |
+| delete | 3 | `revoke_oidc_client`, `revoke_api_key`, `revoke_api_key(reason=…)` |
+| update | **0** | see the finding below |
+| **credential-scoped** | **2** | `get_current_user`, `introspect_api_key` |
+
+**Absence, never 403.** core's rule, quoted in `_errors.CafayeNotFoundError`:
+*"404 is correct there, 403 is not allowed to leak existence."* Four classes hold
+that line, 128 tests in all:
+
+- the scope parameter reaches the path, **and only the path** — a client that
+  dropped `account_id` would let the service fall back to the caller's own
+  membership and return the **wrong tenant's rows with a 200**. Not a 403, not an
+  error: a success carrying somebody else's data, in an SDK, and invisible to a
+  mock transport that answers any URL.
+- a 404 arrives as `CafayeNotFoundError` and is never a `CafayeForbiddenError`.
+- **every observable** of the raised error is byte-identical for another tenant's
+  row and for a row that never existed: message, type, title, detail, instance,
+  status, code, trace id, extensions, per-field errors. Compared against a
+  *constant* response body, so any difference is attributable to the client — the
+  only party in this repository.
+- **no tenant is served from another's answer.** `AGENTS.md`'s "no caching of
+  anything" and tenant isolation are the same rule; a cache keyed on `client_id`
+  without the account returns the wrong rows with a 200 and the right model. Every
+  id in the file is deliberately **shared** between the two tenants so that bug is
+  reachable.
+
+**No 403 was found on the account-scoped surface, and that is now a measurement
+rather than an assumption** — asserted three ways: an AST walk proving no service
+file mentions 403, a check that `_errors._STATUS_CLASSES` is the only
+status-to-class mapping in the package, and a check that `CafayeForbiddenError`
+and `CafayeNotFoundError` are siblings rather than one an ancestor of the other.
+A 403 the *service* sends about the caller's own credential — `DELETE /v1/session`
+is documented to answer 403 to a scoped API token — is asserted to pass through
+**unlaundered**: laundering is the defect, honesty is not.
+
+**The enumeration cannot go stale.** The counts are the deliverable, so the counts
+get a walk: an AST walk of `_services/identity.py` compares every
+`/v1/accounts/` path against the enumeration, in **both** directions, and a second
+walk keys on the *signature* (`account_id` in the parameters) rather than on a
+list of names, on both faces.
+
 **`gate.yml` — the gate is declared, not discovered.** The repository root now
 says what gates it, against `cafaye/core`'s `schemas/gate.schema.json`: the
 entrypoint, the arguments, the mise task, what the gate needs from the machine,
 the CI workflow it is reached from, and seven proofs over the gate's own output
-— three of them countable, at floors of 580 and 586. Two things follow that are
-easy to undo by accident, so they are stated here as well as in the file:
+— three of them countable. Two things follow that are easy to undo by accident, so
+they are stated here as well as in the file:
 
-- A floor is a ratchet. `suite` sits six below the measured 586 so adding a
-  test costs no edit; `no-skip` sits at 586 exactly, because cafaye-py's unit
-  tier has no `skipif`, no `importorskip` and no environment variable anywhere
-  under `tests/`, so the difference between 586 and 585 is one test that did not
-  run.
+- A floor is a ratchet. `no-skip` sits at the **exact** measured count, because
+  cafaye-py's unit tier has no `skipif`, no `importorskip` and no environment
+  variable anywhere under `tests/`, so the difference between that number and one
+  less is one test that did not run. `suite` sits below it, so adding a test costs
+  no edit. The exact number is 586 as declared and **948 as of the entry below**,
+  which raised it; the gap between the two floors is 368, and the drift is named
+  in `gate.yml` rather than left for a reader to notice.
 - `no-skip`'s negative lookahead is what makes a skip a red rather than a
-  decrement. Measured: one test made to skip produced `585 passed, 1 skipped`,
-  100.00% coverage, `prime: unit tier GREEN` and **exit 0** from the gate — and
-  `gate-check --prove` was still red, naming `gate.proof-missing` on that proof
-  alone.
+  decrement. Measured on the 586-test suite: one test made to skip produced
+  `585 passed, 1 skipped`, 100.00% coverage, `prime: unit tier GREEN` and
+  **exit 0** from the gate — and `gate-check --prove` was still red, naming
+  `gate.proof-missing` on that proof alone. Re-measured on the 948-test suite for
+  the raise, and it behaves the same: `947 passed` trips the floor, and
+  `585 passed, 1 skipped` cannot match the pattern at all.
 
 **The declaration was proven red five times before it was trusted**, and each
 proof is recorded in `gate.yml` with its findings. The headline: `bin/prime`
@@ -33,7 +94,56 @@ replaced by a stub whose whole body is `exit 0` produced **seven**
 `gate.proof-missing` failures. Before this file existed, it would have produced
 none.
 
+### Changed
+
+**`gate.yml`: `no-skip`'s floor raised 586 → 948.** This packet added 362 tests,
+and the floor was 586 *exactly* — cafaye-py's unit tier has no `skipif`, no
+`importorskip` and no environment variable anywhere under `tests/`, so 586 was the
+whole suite and 585 was one test that did not run. Leaving it at 586 would have
+loosened the only proof standing between a silently-shrunk suite and a green badge
+by 362, without anybody deciding to. `AGENTS.md`'s rule is "when you delete a
+test, lower nothing and raise nothing"; nothing was deleted, and the direction
+here is a raise.
+
+`suite`'s floor is **left at 580** and the drift is now named in its own comment:
+it was a deliberate six-test margin against 586 and is now 368 against 948. It is
+the permissive half of the pair — `no-skip` carries the exact count, so a deletion
+is still caught to the test — and putting two floors at the same number is the
+case the `no-skip` comment warns about.
+
+Both verified against the declared patterns, not assumed: `947 passed` trips
+`no-skip` (floor 948), `585 passed, 1 skipped` trips it too, and
+`1 failed, 947 passed` cannot match it at all.
+
+### Findings
+
+**`update 0` — the account-scoped surface has no update verb, so "update" cannot
+be negative-tested at the account path.** Read off the table: identity declares no
+`PATCH` and no `PUT`, at any path. The account-scoped mutations are two creates
+and three deletes, and all five are covered. This is a measurement with a name
+(`TestTheUpdateSlotIsEmpty`), not a gap in the packet — and **not** evidence that
+nothing updates tenant data, because the updates that exist (an API key's
+`last_used_at`, a revoke reason) are fields on a row this client can only write by
+replacing the whole row through a delete and a create.
+
+**`revoke_api_key` is two entry points, and one of them is undeclared.** With a
+`reason` it POSTs to `…/api-keys/{key_id}/revoke`; without one it DELETEs
+`…/api-keys/{key_id}`. Two methods, two paths, two requests, one Python method —
+and it is the **only** account-scoped operation whose wire shape is absent from
+`IDENTITY_OPERATIONS`. A scoping property the table cannot check is asserted
+against the document instead. Enumerating by method name alone would have counted
+seven and left the second wire shape untested.
+
 ### Fixed
+
+**`mypy --warn-unreachable` caught a branch that cannot be taken in the new
+helper**, and it is gone rather than kept with a `pragma`: `_invoke`'s
+`if account_id is not None`, where `account_id` is a plain `str` and no call path
+passes `None`. `warn_return_any` also flagged two functions, because `mypy`
+resolves `from conftest import …` as `Any` (`conftest.py` is not a member of the
+`tests` package, so there is no module to read the annotation off); fixed by
+naming the type on the local, which keeps the check doing its job on the rest of
+the file instead of being switched off.
 
 **`mise run gate` was a dead command, and the fleet's spelling did not exist.**
 `mise.toml`'s `[tasks.gate]` read `run = "./bin/gate"`, and there is no
