@@ -82,8 +82,9 @@ from __future__ import annotations
 
 import json
 import re
+from collections.abc import Callable
 from dataclasses import dataclass, field, fields
-from typing import Any, Callable
+from typing import Any
 
 import httpx
 import pytest
@@ -311,10 +312,17 @@ def _success_handler(entry: EntryPoint) -> Callable[[httpx.Request], httpx.Respo
 
 
 def _invoke(face: str, entry: EntryPoint, account_id: str, stub: Any, **kwargs: Any) -> Any:
-    """Call one entry point on one face and return what came back."""
+    """Call one account-scoped entry point on one face, and return what came back.
+
+    ``account_id`` is a plain ``str`` and there is no second shape: the two
+    credential-scoped entry points take no tenant argument at all and are driven
+    through :func:`_make_client` directly, which is the honest split — a
+    ``None``-means-"omit-the-tenant" convention here would be a branch that
+    cannot be taken, and this repository treats those as findings.
+    """
     namespace, sent = _make_client(face, stub, **kwargs)
     call = getattr(namespace, entry.name)
-    result = call(account_id=account_id, **entry.kwargs) if account_id is not None else call(**entry.kwargs)
+    result = call(account_id=account_id, **entry.kwargs)
     if face == "async":
         result = run(result)
     assert len(sent) == 1, "exactly one request per call — this client never retries"
@@ -494,9 +502,7 @@ class TestTheScopeParameterIsLoadBearing:
         assert "{" not in request.url.path
         assert "%7B" not in request.url.path
 
-    def test_two_tenants_produce_two_different_paths(
-        self, entry: EntryPoint, face: str
-    ) -> None:
+    def test_two_tenants_produce_two_different_paths(self, entry: EntryPoint, face: str) -> None:
         for tenant in (ACCOUNT_A, ACCOUNT_B, ACCOUNT_NONE):
             request = self._one(entry, face, tenant)
             assert request.url.path == entry.render(tenant), tenant
@@ -557,9 +563,7 @@ class TestAbsenceIsNeverLaunderedIntoAForbidden:
             shapes.append(type(caught.value))
         assert shapes[0] is shapes[1] is CafayeNotFoundError
 
-    def test_the_operation_is_reported_never_the_tenant(
-        self, entry: EntryPoint, face: str
-    ) -> None:
+    def test_the_operation_is_reported_never_the_tenant(self, entry: EntryPoint, face: str) -> None:
         """The error names the operation, which is public, and not the account."""
         with pytest.raises(CafayeNotFoundError) as caught:
             _invoke(face, entry, ACCOUNT_B, _absent())
@@ -591,8 +595,18 @@ ABSENT_BODY: dict[str, Any] = {
 
 
 def _absent() -> httpx.Response:
-    """The same document every time, for every tenant. See :data:`ABSENT_BODY`."""
-    return json_response(404, ABSENT_BODY, content_type="application/problem+json")
+    """The same document every time, for every tenant. See :data:`ABSENT_BODY`.
+
+    The local is annotated because ``mypy`` resolves ``from conftest import
+    json_response`` as ``Any`` — ``conftest.py`` is not a member of the ``tests``
+    package, so there is no module for it to read the annotation off. Naming the
+    type here keeps ``warn_return_any`` doing its job on the rest of the file
+    rather than being turned off for the whole suite.
+    """
+    response: httpx.Response = json_response(
+        404, ABSENT_BODY, content_type="application/problem+json"
+    )
+    return response
 
 
 def _echoing(account_id: str) -> httpx.Response:
@@ -605,11 +619,12 @@ def _echoing(account_id: str) -> httpx.Response:
     account id it sent. The oracle would be another tenant's id appearing there,
     and ``TestTheClientAddsNothingOfItsOwn`` is what holds the line on that.
     """
-    return json_response(
+    response: httpx.Response = json_response(
         404,
         {**ABSENT_BODY, "instance": f"/v1/accounts/{account_id}/resource"},
         content_type="application/problem+json",
     )
+    return response
 
 
 @ALL_ENTRIES
@@ -735,6 +750,8 @@ class TestTheErrorCannotDistinguishTheTwo:
             [str(error), error.detail, error.title, error.instance, repr(dict(error.extensions))]
         )
         assert token not in haystack
+
+
 # ---------------------------------------------------------------------------
 # 5. NO TENANT IS SERVED FROM ANOTHER'S ANSWER  (cross-tenant cache bleed)
 # ---------------------------------------------------------------------------
@@ -899,9 +916,12 @@ class TestTheEnumerationIsComplete:
 
         found: set[str] = set()
         for node in ast.walk(_identity_source()):
-            if isinstance(node, ast.Constant) and isinstance(node.value, str):
-                if node.value.startswith("/v1/accounts/"):
-                    found.add(node.value)
+            if (
+                isinstance(node, ast.Constant)
+                and isinstance(node.value, str)
+                and node.value.startswith("/v1/accounts/")
+            ):
+                found.add(node.value)
         return found
 
     def test_every_account_scoped_path_in_the_source_is_enumerated(self) -> None:
@@ -932,9 +952,7 @@ class TestTheEnumerationIsComplete:
         assert len(ACCOUNT_SCOPED) == 8
 
     @pytest.mark.parametrize("face_name", ["sync", "async"], ids=["sync", "async"])
-    def test_every_method_that_takes_an_account_id_is_enumerated(
-        self, face_name: str
-    ) -> None:
+    def test_every_method_that_takes_an_account_id_is_enumerated(self, face_name: str) -> None:
         """The other direction, and keyed on the **signature** rather than a list.
 
         Stating the thirteen public methods that are not account-scoped would be
@@ -972,12 +990,15 @@ class TestTheEnumerationIsComplete:
         enumeration and this number both move, and this test is what makes them
         have to move together.
         """
-        from cafaye._services.identity import IDENTITY_OPERATIONS as table
+        from cafaye._services.identity import IDENTITY_OPERATIONS
 
-        declared = [op for op in table.values() if op.path.startswith("/v1/accounts/")]
+        declared = [
+            op for op in IDENTITY_OPERATIONS.values() if op.path.startswith("/v1/accounts/")
+        ]
         assert len(declared) == 7
-        assert {op.path for op in declared} == {entry.path for entry in ACCOUNT_SCOPED
-                                                if entry.also_reaches is None}
+        assert {op.path for op in declared} == {
+            entry.path for entry in ACCOUNT_SCOPED if entry.also_reaches is None
+        }
 
 
 class TestNoAuthorisationGateInTheSources:
@@ -1155,17 +1176,14 @@ class TestTheClientHoldsNoTenantState:
         holding the last decoded body — the second assertion fails and the bug is
         a cross-tenant read in the most innocent-looking code there is.
         """
+
         def answering(account_id: str, user_id: str) -> Callable[[httpx.Request], httpx.Response]:
             return lambda _request: httpx.Response(
                 200, json={"id": user_id, "email": f"{account_id}@b.test"}
             )
 
-        a_ns, _ = _make_client(
-            face, answering(ACCOUNT_A, "usr_a"), token="TESTONLY-a"
-        )
-        b_ns, _ = _make_client(
-            face, answering(ACCOUNT_B, "usr_b"), token="TESTONLY-b"
-        )
+        a_ns, _ = _make_client(face, answering(ACCOUNT_A, "usr_a"), token="TESTONLY-a")
+        b_ns, _ = _make_client(face, answering(ACCOUNT_B, "usr_b"), token="TESTONLY-b")
         call_a, call_b = a_ns.get_current_user, b_ns.get_current_user
         if face == "async":
             first, second = run(call_a()), run(call_b())
@@ -1183,6 +1201,7 @@ class TestTheClientHoldsNoTenantState:
         token belonged to — keeps answering for the first account, and the failure
         appears only in production, on a long-lived worker, after a token rotation.
         """
+
         # The double answers by CREDENTIAL, not by a fixed body: a handler that
         # returned the same user every time would make this test pass on a client
         # that had cached the first answer and never sent the second request. What
@@ -1240,9 +1259,7 @@ class TestTheModelsDoNotMergeTenants:
         assert first is not second, entry.name
         assert first == second, "same body, so equal — but two objects, not one"
 
-    def test_the_second_answer_is_the_second_response(
-        self, entry: EntryPoint, face: str
-    ) -> None:
+    def test_the_second_answer_is_the_second_response(self, entry: EntryPoint, face: str) -> None:
         """The load-bearing one, and the only one that can see a cache.
 
         The first call answers with a body stamped ``ACCOUNT_A``; the second, for
@@ -1251,6 +1268,7 @@ class TestTheModelsDoNotMergeTenants:
         body — equal to the first answer, wrong for the second tenant, and
         invisible to every other test in this file.
         """
+
         def answering(account_id: str) -> Callable[[httpx.Request], httpx.Response]:
             if entry.kind == "list":
                 return lambda _request: httpx.Response(
@@ -1403,7 +1421,9 @@ class TestAListingBelongsToTheAccountItWasAskedAbout:
         if entry.kind != "list":
             assert entry.kind in {"read", "create", "delete"}, entry.name
             return
-        page = _invoke(face, entry, ACCOUNT_B, lambda _request: httpx.Response(200, json=_empty_page()))
+        page = _invoke(
+            face, entry, ACCOUNT_B, lambda _request: httpx.Response(200, json=_empty_page())
+        )
         assert page.data == ()
         assert page.next_cursor is None
         assert page.has_more is False
